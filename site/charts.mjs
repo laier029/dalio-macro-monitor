@@ -21,7 +21,7 @@ export function renderChart(series,{height=250,width=740,normalizeBase=false}={}
   let svg=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-labelledby="${id}-title ${id}-description"><title id="${id}-title">${escape(lines.map(l=>l.displayName).join('、'))}历史趋势</title><desc id="${id}-description">${normalizeBase?'共同期初 = 100':escape(lines[0].unit)}。可在图下拖动观察期，或用左右方向键逐期读取数值。</desc>`;
   for(let i=0;i<5;i++){const v=ymin+(ymax-ymin)*i/4,yy=y(v);svg+=`<line class="grid" x1="${L}" x2="${W-R}" y1="${yy}" y2="${yy}"/><text x="${L-8}" y="${yy+3}" text-anchor="end">${number(v,Math.abs(v)<10?1:0)}</text>`;}
   const ticks=W<400?3:5;
-  for(let i=0;i<ticks;i++){const t=xmin+(xmax-xmin)*i/(ticks-1),d=new Date(t),xx=L+(W-L-R)*i/(ticks-1);svg+=`<text x="${xx}" y="${H-7}" text-anchor="middle">${d.getUTCFullYear()}${xmax-xmin<86400000*900?'-'+String(d.getUTCMonth()+1).padStart(2,'0'):''}</text>`;}
+  for(let i=0;i<ticks;i++){const t=xmin+(xmax-xmin)*i/(ticks-1),d=new Date(t),xx=L+(W-L-R)*i/(ticks-1);svg+=`<text x="${xx}" y="${H-7}" text-anchor="middle">${d.getUTCFullYear()}${xmax-xmin<86400000*1461?'-'+String(d.getUTCMonth()+1).padStart(2,'0'):''}</text>`;}
   for(const l of lines){
     let path='',last=null,forecast=false;
     const flush=()=>{if(path)svg+=`<path class="series-line" stroke="${l.color}" ${forecast?'stroke-dasharray="5 5"':''} d="${path}"/>`;path='';};
@@ -54,9 +54,10 @@ export function bindCharts(root=document){
         const point=line.points.get(date),value=readings[i].querySelector('[data-chart-value]'),raw=readings[i].querySelector('[data-chart-raw]');
         markers[i].style.display=point?'':'none';
         if(!point){value.textContent='当期无值';raw.textContent='未插值或沿用其他日期';spoken.push(`${line.displayName} 当期无值`);return;}
-        const flag=point[2]==='forecast'?' · 预测':point[2]==='historical-estimate'?' · 历史/估计':point[2]==='derived'?' · 项目计算':'';
-        value.textContent=`${number(point[1])} ${line.unit}${flag}`;
-        const original=line.raw?.get(date);raw.textContent=original?`对应数值 ${number(original[1])} ${line.rawUnit}`:'';
+        const flag=point[2]==='forecast'?' · 预测':point[2]==='historical-estimate'?' · 历史/估计':point[2]==='derived'?' · 项目计算':point[2]==='source-discrepancy'?' · 来源分项未对平':'';
+        const precision=line.group==='fx'?4:line.metric?.startsWith('treasury_')&&line.unit==='%'?3:2;
+        value.textContent=`${number(point[1],precision)} ${line.unit}${flag}`;
+        const original=line.raw?.get(date);raw.textContent=original?`对应数值 ${number(original[1],line.group==='fx'?4:2)} ${line.rawUnit}`:'';
         markers[i].setAttribute('cx',x(date));markers[i].setAttribute('cy',y(point[1]));
         spoken.push(`${line.displayName} ${value.textContent}${original?'，'+raw.textContent:''}`);
       });

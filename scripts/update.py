@@ -219,6 +219,134 @@ def pink_series(raw, source):
     return result
 
 
+def fiscal_rows(raw, source):
+    payload=json.loads(raw);rows=payload['data']
+    if len(rows)!=payload['meta']['total-count']:
+        raise ValueError('Fiscal Data response is incomplete')
+    if payload.get('responsePages'):source['responsePages']=payload['responsePages']
+    keys=[(r['record_date'],r['src_line_nbr']) for r in rows]
+    if len(set(keys))!=len(keys):raise ValueError('Duplicate Fiscal Data rows/pages')
+    if any(dt.date.fromisoformat(r['record_date'])>NOW.date() for r in rows):
+        raise ValueError('Future Fiscal Data observation')
+    return rows
+
+
+def fiscal_debt_series(raw, source):
+    rows=fiscal_rows(raw,source);bydate={}
+    for r in rows:
+        kind='Total Public Debt Outstanding' if r['security_type_desc']=='Total Treasury Securities Outstanding' else r['security_type_desc']
+        bydate.setdefault(r['record_date'],{})[(kind,r['security_class_desc'])]=r
+    fields=[('treasury_total','联邦国债总额','Total Public Debt Outstanding','_','total_mil_amt'),
+        ('treasury_public','公众持有联邦国债','Total Public Debt Outstanding','_','debt_held_public_mil_amt'),
+        ('treasury_intragov','政府内部持有联邦国债','Total Public Debt Outstanding','_','intragov_hold_mil_amt'),
+        ('treasury_marketable','可交易国债余额','Total Marketable','_','total_mil_amt'),
+        ('treasury_nonmarketable','不可交易国债余额','Total Nonmarketable','_','total_mil_amt')]
+    fields += [('treasury_'+key,label,'Marketable',name,'total_mil_amt') for key,label,name in [
+        ('bills','短期国库券余额','Bills'),('notes','中期国债余额','Notes'),('bonds','长期国债余额','Bonds'),
+        ('tips','TIPS 余额','Treasury Inflation-Protected Securities'),('frn','浮息国债余额','Floating Rate Notes'),('ffb','联邦融资银行证券余额','Federal Financing Bank')]]
+    discrepancies={}
+    for date,group in bydate.items():
+        total=group.get(('Total Public Debt Outstanding','_'))
+        if not total:raise ValueError('MSPD lacks total row for '+date)
+        public,internal,amount=[numeric(total[k]) for k in ['debt_held_public_mil_amt','intragov_hold_mil_amt','total_mil_amt']]
+        if None in [public,internal,amount]:raise ValueError('MSPD ownership values missing: '+date)
+        if abs(public+internal-amount)>.02:discrepancies[date[:7]]=round(public+internal-amount,6)
+    result=[]
+    for metric,label,kind,category,field in fields:
+        values=[]
+        for date,group in sorted(bydate.items()):
+            legacy_sum=False
+            row=group.get((kind,category));value=numeric(row.get(field)) if row else None
+            if metric=='treasury_tips' and row is None:
+                legacy=[group.get(('Marketable',x),{}).get(field) for x in ['Inflation-Indexed Notes','Inflation-Indexed Bonds']]
+                if all(numeric(x) is not None for x in legacy):value=sum(numeric(x) for x in legacy);legacy_sum=True
+            if value is not None:
+                point=[date[:7],round(value/1000,6)]
+                if legacy_sum:point.append('derived')
+                if metric in ['treasury_total','treasury_public','treasury_intragov'] and date[:7] in discrepancies:point.append('source-discrepancy')
+                values.append(point)
+        s=make_series('US',metric,label,'十亿美元','M','funding',values,dict(source,key=f'{kind} / {category} / {field}'))
+        if s:
+            s['definition']='美国财政部 MSPD 表 1，月末联邦国债本金余额；原始百万美元换算为十亿美元。'
+            s['note']='联邦财政部口径，不与 IMF 一般政府债务混用。公众持有包含美联储、境内私人、州及地方政府、境外等持有人，并不等于外国持有。TIPS 余额含截至报告日的通胀调整。'
+            if metric=='treasury_tips':
+                s['formula']='早期来源分列时：Inflation-Indexed Notes + Inflation-Indexed Bonds；其余月份使用官方 TIPS 合计，金额从百万美元换算为十亿美元。'
+                s['note']+=' 早期 TIPS 余额为来源单列的 Inflation-Indexed Notes 与 Bonds 之和，标记 derived。'
+            if metric in ['treasury_total','treasury_public','treasury_intragov']:
+                s['reconciliationDifferencesMillions']=discrepancies
+                s['note']+=' 源表部分历史月份的公众持有加政府内部持有与总额存在小额差异；按来源原值保留，并标记 source-discrepancy，不自行改平。'
+            result.append(s)
+    return result
+
+
+def fiscal_interest_series(raw, source):
+    rows=fiscal_rows(raw,source);result=[]
+    for key,label,category in [('avg_rate','可交易国债平均利率','Total Marketable'),('rate_bills','存量国库券平均利率','Treasury Bills'),('rate_notes','存量中期国债平均利率','Treasury Notes'),('rate_bonds','存量长期国债平均利率','Treasury Bonds'),('rate_frn','存量浮息国债平均利率','Treasury Floating Rate Notes (FRN)')]:
+        values=[[r['record_date'][:7],numeric(r['avg_interest_rate_amt'])] for r in rows if r['security_type_desc']=='Marketable' and r['security_desc']==category and numeric(r['avg_interest_rate_amt']) is not None]
+        s=make_series('US','treasury_'+key,label,'%','M','funding',values,dict(source,key=f'Marketable / {category} / avg_interest_rate_amt'))
+        if s:
+            s['definition']='财政部发布的月末未到期附息债务平均利率，按其存量债务与利息口径计算；不是当日新发债券收益率。'
+            s['note']='综合可交易债务平均利率按官方定义排除 TIPS 与浮息债；浮息债在分项中单独列出。不能把该利率乘以含 TIPS、浮息债的总余额当作精确年度利息。'
+            result.append(s)
+    return result
+
+
+def month_after(date, months):
+    month=date.year*12+date.month-1+months;year,m=divmod(month,12);m+=1
+    return dt.date(year,m,calendar.monthrange(year,m)[1])
+
+
+def fiscal_maturity_series(raw, source):
+    rows=fiscal_rows(raw,source);bydate={}
+    for r in rows:bydate.setdefault(r['record_date'],[]).append(r)
+    classes={'Bills Maturity Value':'Total Unmatured Treasury Bills','Notes':'Total Unmatured Treasury Notes','Bonds':'Total Unmatured Treasury Bonds','Inflation-Protected Securities':'Total Treasury TIPS','Floating Rate Notes':'Total Treasury Floating Rate Notes'}
+    metrics={k:[] for k in ['due_3m','due_12m','share_12m','remaining_years','covered']}
+    profile=None
+    for date,items in sorted(bydate.items()):
+        asof=dt.date.fromisoformat(date);leaves=[]
+        for category,total_label in classes.items():
+            group=[r for r in items if r['security_class1_desc']==category]
+            if category=='Floating Rate Notes' and any(r['security_class2_desc']=='Total Unmatured Treasury Floating Rate Notes' for r in group):total_label='Total Unmatured Treasury Floating Rate Notes'
+            totals=[numeric(r['outstanding_amt']) for r in group if r['security_class2_desc']==total_label]
+            if len(totals)!=1 or totals[0] is None:raise ValueError('MSPD maturity subtotal missing: '+category+' '+date)
+            selected=[]
+            for r in group:
+                if not re.fullmatch(r'[A-Z0-9]{9}',r['security_class2_desc']) or r['maturity_date']=='null':continue
+                amount=numeric(r['outstanding_amt'])
+                # Reopenings repeat a CUSIP but carry its outstanding total on only one row.
+                if amount is None:
+                    if r['outstanding_amt']!='null':raise ValueError('Ambiguous maturity principal')
+                    continue
+                maturity=dt.date.fromisoformat(r['maturity_date'])
+                if amount<0 or maturity<=asof:raise ValueError('Invalid unmatured principal')
+                selected.append((r['security_class2_desc'],maturity,amount))
+            if abs(sum(x[2] for x in selected)-totals[0])>.02:
+                raise ValueError('Maturity detail does not reconcile: '+category+' '+date)
+            # Some releases split the outstanding balance across reopening rows.
+            # Sum these only after the official class subtotal has reconciled.
+            securities={}
+            for cusip,maturity,amount in selected:
+                if cusip in securities and securities[cusip][1]!=maturity:raise ValueError('Conflicting CUSIP maturities')
+                prior=securities.get(cusip,(cusip,maturity,0));securities[cusip]=(cusip,maturity,prior[2]+amount)
+            leaves.extend(securities.values())
+        total=sum(x[2] for x in leaves)
+        overall=[numeric(r['outstanding_amt']) for r in items if r['security_class1_desc']=='Total Marketable']
+        if len(overall)!=1 or overall[0] is None or total<=0 or total>overall[0]+.02:raise ValueError('Invalid maturity coverage')
+        due=lambda n:sum(x[2] for x in leaves if x[1]<=month_after(asof,n))
+        values={'due_3m':due(3)/1000,'due_12m':due(12)/1000,'share_12m':due(12)/total*100,'remaining_years':sum((x[1]-asof).days*x[2] for x in leaves)/total/365.25,'covered':total/1000}
+        for key,value in values.items():metrics[key].append([date[:7],round(value,6),'derived'])
+        profile=dict(asOf=date,securityCount=len(leaves),coveredPrincipal=round(total/1000,6),marketablePrincipal=round(overall[0]/1000,6),excludedPrincipal=round((overall[0]-total)/1000,6),coveragePercent=round(total/overall[0]*100,6),
+            months=[[month_after(asof,n).isoformat()[:7],round(sum(x[2] for x in leaves if month_after(asof,n-1)<x[1]<=month_after(asof,n))/1000,6)] for n in range(1,13)])
+    result=[]
+    for key,label,unit,formula in [('due_3m','未来 3 个月到期本金','十亿美元','报告月末未到期证券中，随后 3 个自然月到期的未偿本金合计。'),('due_12m','未来 12 个月到期本金','十亿美元','报告月末未到期证券中，随后 12 个自然月到期的未偿本金合计。'),('share_12m','未来 12 个月到期本金占比','%','未来 12 个月到期本金 ÷ 本次覆盖的未到期可交易债务本金 ×100。'),('remaining_years','加权平均剩余期限','年','逐只证券的剩余天数按未偿本金加权平均，再除以 365.25；不是久期。'),('covered','到期分析覆盖本金','十亿美元','按唯一 CUSIP 汇总未到期 Bills、Notes、Bonds、TIPS 与 FRN 的 outstanding_amt。')]:
+        s=make_series('US','maturity_'+key,label,unit,'M','funding',metrics[key],dict(source,key='MSPD table 3 / outstanding_amt + maturity_date'),calculated=True,formula=formula)
+        if s:
+            s['definition']=formula;s['note']='按报告月末存量计算，合并增发并与官方分类小计核对。含美联储持有部分；排除联邦融资银行证券及已到期未兑付余额。TIPS 使用报告日调整后本金，未预测未来通胀。不是未来全年总发行量：未加入未来赤字、利息或年内反复滚动的短券。'
+            if key=='due_12m':s['maturityProfile']=profile
+            result.append(s)
+    return result
+
+
 def derived(series):
     index={s['id']:s for s in series};out=[]
     for a in AREA:
@@ -261,14 +389,33 @@ def validate_source_coverage(current, previous, dataset):
             raise ValueError('Source history unexpectedly contracted: '+old['id'])
 
 
+def request_bytes(url):
+    run=subprocess.run(['curl','--fail','--silent','--show-error','--location','--globoff','--retry','2','--retry-delay','2','--connect-timeout','20','--max-time','100',url],capture_output=True)
+    if run.returncode:raise RuntimeError(run.stderr.decode()[:220])
+    return run.stdout
+
+
+def complete_fiscal_pages(raw, url):
+    first=json.loads(raw);pages=first['meta']['total-pages'];count=first['meta']['total-count']
+    if not 1<=pages<=50:raise ValueError('Unexpected Fiscal Data page count')
+    if pages==1:return raw
+    rows=list(first['data']);proof=[dict(url=url,sha256=hashlib.sha256(raw).hexdigest())]
+    for number in range(2,pages+1):
+        page_url=url+'&page[number]='+str(number);body=request_bytes(page_url);page=json.loads(body)
+        if page['meta']['total-count']!=count or page['meta']['total-pages']!=pages:
+            raise ValueError('Fiscal Data changed during pagination')
+        rows.extend(page['data']);proof.append(dict(url=page_url,sha256=hashlib.sha256(body).hexdigest()))
+    if len(rows)!=count:raise ValueError('Missing Fiscal Data pages')
+    return json.dumps(dict(data=rows,meta=first['meta'],responsePages=proof),ensure_ascii=False,separators=(',',':')).encode()
+
+
 def fetch(spec, offline=False, previous=None):
     name,url,ext,parser=spec;path=CACHE/(name+'.'+ext)
     if offline:
         raw=path.read_bytes();fetched=dt.datetime.fromtimestamp(path.stat().st_mtime,dt.timezone.utc).isoformat()
     else:
-        run=subprocess.run(['curl','--fail','--silent','--show-error','--location','--globoff','--retry','2','--retry-delay','2','--connect-timeout','20','--max-time','100',url],capture_output=True)
-        if run.returncode:raise RuntimeError(run.stderr.decode()[:220])
-        raw=run.stdout;fetched=NOW.isoformat()
+        raw=request_bytes(url);fetched=NOW.isoformat()
+        if name.startswith('US Fiscal:'):raw=complete_fiscal_pages(raw,url)
     src=dict(name=name.split(':')[0],dataset=name,url=url,download=url,fetchedAt=fetched,sha256=hashlib.sha256(raw).hexdigest(),status='ok',releaseDate=None)
     data=parser(raw,src)
     if not data:raise ValueError('No selected series: check schema/coverage')
@@ -296,6 +443,11 @@ def specs(offline=False):
         for key,kind in [('nominal','daily_treasury_yield_curve'),('real','daily_treasury_real_yield_curve')]:
             url=f'https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/{year}/all?type={kind}&field_tdr_date_value={year}&page&_format=csv'
             jobs.append((f'US Treasury:{key}:{year}',url,'csv',lambda raw,s,k=key:treasury_series(k,raw,s)))
+    base='https://api.fiscaldata.treasury.gov/services/api/fiscal_service/'
+    for name,path,parser in [('debt','v1/debt/mspd/mspd_table_1',fiscal_debt_series),('interest','v2/accounting/od/avg_interest_rates',fiscal_interest_series)]:
+        jobs.append(('US Fiscal:'+name,base+path+'?sort=record_date,src_line_nbr&page[size]=10000','json',parser))
+    url=base+'v1/debt/mspd/mspd_table_3?fields=record_date,src_line_nbr,security_type_desc,security_class1_desc,security_class2_desc,maturity_date,outstanding_amt&filter=record_date:gte:2024-01-01,security_type_desc:eq:Marketable&sort=record_date,src_line_nbr&page[size]=10000'
+    jobs.append(('US Fiscal:maturity',url,'json',fiscal_maturity_series))
     return jobs
 
 
@@ -324,6 +476,14 @@ def validate(data):
             if s.get('forecastFrom'):
                 assert (len(p)>2 and p[2]=='forecast') == (int(p[0])>=s['forecastFrom'])
             else:assert period_end(p[0])<=NOW.date(), 'Future actual value'
+        if s.get('maturityProfile'):
+            profile=s['maturityProfile'];asof=dt.date.fromisoformat(profile['asOf'])
+            assert asof<=NOW.date() and profile['asOf'][:7]==s['values'][-1][0]
+            assert [p[0] for p in profile['months']]==[month_after(asof,n).isoformat()[:7] for n in range(1,13)]
+            assert all(math.isfinite(p[1]) and p[1]>=0 for p in profile['months'])
+            assert abs(sum(p[1] for p in profile['months'])-s['values'][-1][1])<.00002, 'maturity months do not match total'
+            assert 0<profile['coveredPrincipal']<=profile['marketablePrincipal']
+            assert abs(profile['coveredPrincipal']+profile['excludedPrincipal']-profile['marketablePrincipal'])<.00002
     for a in AREA:
         assert f'{a}.debt_P' in ids and f'{a}.policy' in ids, 'Core coverage missing'
     for a in ['CN','HK','XM']:

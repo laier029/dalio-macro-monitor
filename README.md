@@ -14,11 +14,12 @@
 - 同一财政版本计算的政府净利息/收入及债务/收入。
 - 世界银行年度国际储备、银行指标、人均实际 GDP 与月度商品价格。
 - 美国财政部国债/TIPS 收益率；同频资产价格变化、月均币种换算及 CPI 调整。
+- 美国联邦国债存量、公众/政府内部持有、债券品种与平均利率；逐只证券核对的 3/12 个月到期本金、平均剩余期限及月度分布。
 - 图表支持鼠标、轻点与键盘逐期读数；共同观察期对齐资产变化，并保留各来源最新期。
 - 数据来源、原始下载地址、快照时间、源文件哈希、失败状态及 CSV 导出。换算序列同时列出价格、汇率、CPI 的输入来源和公式。
 - 每日自动检查、快照变更记录和每周汇总；上游失败保留旧数据并标识。
 
-完整十一模块及实际覆盖列在网站“方法与来源”。持有人、债务到期明细、股票与基金总回报等尚待接入；当前价格变化不替代总回报。
+完整十一模块及实际覆盖列在网站“方法与来源”。境内外持有人细分、其他地区债务到期明细、股票与基金总回报等尚待接入；当前价格变化不替代总回报。
 
 ## 本地使用
 
@@ -68,3 +69,13 @@ python -m http.server 8766 --directory site
 原始统计的权利归其发布者。本项目不对第三方数据重新许可，不上传书籍或复印原著图表。中文 BIS 说明为非官方翻译。
 
 官方来源：[BIS 数据与条款](https://data.bis.org/help/legal)、[IMF DataMapper](https://www.imf.org/external/datamapper/api/help)、[世界银行数据条款](https://www.worldbank.org/ext/en/legal/terms-conditions/datasets)、[Pink Sheet](https://www.worldbank.org/en/research/commodity-markets)、[美国财政部](https://home.treasury.gov/resource-center/data-chart-center/interest-rates).
+
+## 美国国债结构与续借口径
+
+财政部 MSPD 与平均利率 API 新增 21 条序列。月末联邦本金余额与 IMF 一般政府指标分开；公众持有包含美联储，并不等于外国持有。综合平均利率按官方定义排除 TIPS 与浮息债。
+
+到期计算从 2024 年起，按同月报表的 CUSIP、到期日及未偿本金计算。增发明细先与官方未到期分类小计核对，再合并同一只证券；排除已到期未兑付余额及联邦融资银行证券。TIPS 使用报告日调整后本金。未来十二个月的存量到期安排不包含未来赤字、新发债、利息或短券年内反复滚动，因此不是总融资需求。平均剩余期限不是久期。
+
+多页 API 响应全部读取，并保存每页网址及 SHA-256；分页缺失或分类小计不一致时保留旧值。源表部分历史持有分类与总额有小额差异，原值及差额保留，并以 `source-discrepancy` 标记，不自行改平。
+
+官方定义：[MSPD](https://fiscaldata.treasury.gov/datasets/monthly-statement-public-debt/)、[平均利率](https://fiscaldata.treasury.gov/datasets/average-interest-rates-treasury-securities/)、[API 与使用许可](https://fiscaldata.treasury.gov/api-documentation/)。
