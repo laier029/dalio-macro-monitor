@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="基于达利欧债务周期框架，观察七个国家与地区的债务、偿债、货币政策和资产变化。所有数据附有日期、口径和官方来源。">
+  <meta name="theme-color" content="#163e36">
+  <title>全球宏观观察 · Macro Observatory</title>
+  <link rel="icon" type="image/svg+xml" href="icon.svg">
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.mjs"></script>
+</head>
+<body>
+  <a class="skip" href="#main">跳到主要内容</a>
+  <aside class="sidebar">
+    <a class="brand" href="#overview" aria-label="全球宏观观察首页"><svg viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="17"/><ellipse cx="20" cy="20" rx="8" ry="17"/><path d="M3 20h34M7 9c7 6 19 6 26 0M7 31c7-6 19-6 26 0"/></svg><span>全球宏观观察<small>MACRO OBSERVATORY</small></span></a>
+    <div class="nav-label">观察工作台</div>
+    <nav aria-label="主导航">
+      <a href="#overview" data-route="overview"><span aria-hidden="true">◫</span>全球概览</a>
+      <a href="#countries" data-route="countries"><span aria-hidden="true">◎</span>地区详情</a>
+      <a href="#assets" data-route="assets"><span aria-hidden="true">↗</span>资产观察</a>
+      <a href="#updates" data-route="updates"><span aria-hidden="true">◷</span>更新记录</a>
+      <a href="#methods" data-route="methods"><span aria-hidden="true">≡</span>方法与来源</a>
+    </nav>
+    <div class="sidebar-note"><span class="tiny-cap">THE BIG CYCLE</span><p>从收入与债务<br>理解政策与资产。</p><small>参考达利欧债务周期研究<br>独立项目 · 公开数据</small></div>
+    <a class="repo-link" href="https://github.com/laier029/dalio-macro-monitor" target="_blank" rel="noopener">查看 GitHub 项目 <span>↗</span></a>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><span>研究工作台 <span class="muted"> / </span> <span id="breadcrumb">全球概览</span></span><span id="freshness" class="sync"><span class="dot"></span>读取数据快照…</span></header>
+    <main id="main" tabindex="-1"><div class="loading"><div class="loading-orbit"></div><h1>正在打开宏观观察站</h1><p>载入来源与历史数据…</p></div></main>
+    <footer><span>公开数据 · 可追溯口径 · 随发布更新</span><span>数值用于观察与研究，不提供自动交易信号。</span></footer>
+  </div>
+  <noscript>请启用 JavaScript 查看图表。您也可以下载 <a href="data/dashboard.json">公开数据快照</a>。</noscript>
+</body>
+</html>
