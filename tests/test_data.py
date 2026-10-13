@@ -6,6 +6,22 @@ import unittest
 from unittest.mock import patch
 import tempfile
 
+def fiscal_payload(rows):
+    return json.dumps(dict(data=rows,meta={'total-count':len(rows),'total-pages':1})).encode()
+
+def maturity_fixture():
+    classes=[('Bills Maturity Value','Total Unmatured Treasury Bills','2026-10-31',100),
+        ('Notes','Total Unmatured Treasury Notes','2027-09-30',200),
+        ('Bonds','Total Unmatured Treasury Bonds','2027-10-31',300),
+        ('Inflation-Protected Securities','Total Treasury TIPS','2028-09-30',400),
+        ('Floating Rate Notes','Total Treasury Floating Rate Notes','2026-12-31',50)]
+    rows=[]
+    for i,(kind,label,date,amount) in enumerate(classes):
+        rows.extend([dict(record_date='2026-09-30',security_class1_desc=kind,security_class2_desc=f'9123456{i}0',maturity_date=date,outstanding_amt=str(amount)),dict(record_date='2026-09-30',security_class1_desc=kind,security_class2_desc=label,maturity_date='null',outstanding_amt=str(amount))])
+    rows.append(dict(record_date='2026-09-30',security_class1_desc='Total Marketable',security_class2_desc='null',maturity_date='null',outstanding_amt='1060'))
+    for i,r in enumerate(rows):r['src_line_nbr']=str(i+1)
+    return rows
+
 ROOT=Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location('update',ROOT/'scripts/update.py')
 update=importlib.util.module_from_spec(spec);spec.loader.exec_module(update)
@@ -18,6 +34,16 @@ class DataTests(unittest.TestCase):
 
     def test_snapshot_invariants(self):
         self.assertTrue(update.validate(self.data))
+
+    def test_maturity_profile_cannot_disagree_with_history_total(self):
+        bad=copy.deepcopy(self.data)
+        # This check remains compatible with snapshots predating the new source.
+        item=next((s for s in bad['series'] if s.get('maturityProfile')),None)
+        if not item:
+            result=update.fiscal_maturity_series(fiscal_payload(maturity_fixture()),{'url':'https://example.gov/data'})
+            item=result[1];bad['series'].append(item)
+        item['maturityProfile']['months'][0][1]+=1
+        with self.assertRaisesRegex(AssertionError,'maturity months'):update.validate(bad)
 
     def test_fiscal_cashflow_uses_same_vintage_and_net_interest(self):
         for a in update.AREA:
@@ -56,6 +82,60 @@ class DataTests(unittest.TestCase):
         for s in self.data['series']:
             dates=[p[0] for p in s['values']]
             self.assertEqual(dates,sorted(set(dates)),s['id'])
+
+    def test_maturity_horizons_and_coverage_use_existing_principal(self):
+        result=update.fiscal_maturity_series(fiscal_payload(maturity_fixture()),{'name':'US Fiscal','status':'ok'})
+        byid={s['metric']:s for s in result}
+        self.assertEqual(byid['maturity_due_3m']['values'][-1][1],.15)
+        self.assertEqual(byid['maturity_due_12m']['values'][-1][1],.35)
+        self.assertAlmostEqual(byid['maturity_share_12m']['values'][-1][1],350/1050*100,places=5)
+        profile=byid['maturity_due_12m']['maturityProfile']
+        self.assertEqual(profile['securityCount'],5)
+        self.assertEqual(profile['excludedPrincipal'],.01)
+        self.assertAlmostEqual(sum(p[1] for p in profile['months']),.35)
+        self.assertEqual(profile['months'][0][0],'2026-10')
+        self.assertEqual(profile['months'][-1][0],'2027-09')
+
+    def test_reopenings_can_have_null_or_split_balances(self):
+        rows=maturity_fixture();reopening=dict(rows[0],src_line_nbr='99',outstanding_amt='null');rows.append(reopening)
+        result=update.fiscal_maturity_series(fiscal_payload(rows),{})
+        self.assertEqual(result[1]['maturityProfile']['securityCount'],5)
+        rows[0]['outstanding_amt']='60';rows[-1]['outstanding_amt']='40'
+        result=update.fiscal_maturity_series(fiscal_payload(rows),{})
+        self.assertEqual(result[1]['maturityProfile']['securityCount'],5)
+        self.assertEqual(result[1]['values'][-1][1],.35)
+        rows[-1]['outstanding_amt']='60'
+        with self.assertRaisesRegex(ValueError,'does not reconcile'):update.fiscal_maturity_series(fiscal_payload(rows),{})
+
+    def test_matured_floating_rate_notes_not_counted_as_future_rollover(self):
+        rows=maturity_fixture();rows[-2]['outstanding_amt']='70';rows[-1]['outstanding_amt']='1080';base=rows[-2]
+        rows.append(dict(base,src_line_nbr='98',security_class2_desc='Total Unmatured Treasury Floating Rate Notes',outstanding_amt='50'))
+        rows.append(dict(base,src_line_nbr='99',security_class2_desc='Total Matured Treasury Floating Rate Notes',outstanding_amt='20'))
+        result=update.fiscal_maturity_series(fiscal_payload(rows),{})
+        self.assertEqual(result[1]['values'][-1][1],.35)
+
+    def test_duplicate_fiscal_pages_and_missing_subtotals_are_rejected(self):
+        rows=maturity_fixture()
+        with self.assertRaisesRegex(ValueError,'Duplicate'):update.fiscal_maturity_series(fiscal_payload(rows+rows),{})
+        rows.pop(1)
+        with self.assertRaisesRegex(ValueError,'subtotal missing'):update.fiscal_maturity_series(fiscal_payload(rows),{})
+
+    def test_pagination_keeps_each_response_hash_and_rejects_changed_totals(self):
+        def page(rows,count=2):return json.dumps(dict(data=rows,meta={'total-count':count,'total-pages':2})).encode()
+        first=page([{'record_date':'2026-08-31','src_line_nbr':'1'}]);second=page([{'record_date':'2026-09-30','src_line_nbr':'1'}])
+        with patch.object(update,'request_bytes',return_value=second) as request:
+            combined=update.complete_fiscal_pages(first,'https://example.gov/api?page[size]=1')
+        parsed=json.loads(combined);self.assertEqual(len(parsed['data']),2)
+        self.assertEqual(len(parsed['responsePages']),2);self.assertEqual(len(parsed['responsePages'][0]['sha256']),64)
+        request.assert_called_once_with('https://example.gov/api?page[size]=1&page[number]=2')
+        with patch.object(update,'request_bytes',return_value=page([],3)):
+            with self.assertRaisesRegex(ValueError,'changed during'):update.complete_fiscal_pages(first,'https://example.gov/api?size=1')
+
+    def test_official_ownership_discrepancy_is_preserved_and_marked(self):
+        row=dict(record_date='2020-01-31',src_line_nbr='1',security_type_desc='Total Treasury Securities Outstanding',security_class_desc='_',debt_held_public_mil_amt='70',intragov_hold_mil_amt='30',total_mil_amt='101')
+        result=update.fiscal_debt_series(fiscal_payload([row]),{})
+        self.assertEqual(result[0]['values'],[['2020-01',.101,'source-discrepancy']])
+        self.assertEqual(result[0]['reconciliationDifferencesMillions']['2020-01'],-1)
 
     def test_partial_source_cannot_silently_drop_existing_regions(self):
         old=[self.index['US.dsr_P'],self.index['HK.dsr_P']]
