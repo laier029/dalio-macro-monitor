@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {latest,observed,change,periodDate,normalize,convertMonthly,freshness} from '../site/core.mjs';
+import {latest,observed,change,periodDate,normalize,convertMonthly,freshness,commonObservations,nearestIndex,provenance} from '../site/core.mjs';
+import {renderChart,resetCharts} from '../site/charts.mjs';
 const series=(values,frequency='M')=>({values,frequency,source:{status:'ok'},currency:'USD',unit:'美元/盎司'});
 test('forecast is not the latest historical observation',()=>{
  const s=series([['2025',2,'historical-estimate'],['2026',3,'forecast']],'A');
@@ -32,6 +33,51 @@ test('monthly FX and CPI must share the exact period',()=>{
  assert.equal(result.currency,'CNY');assert.match(result.unit,/CNY/);
 });
 test('zero baselines cannot create infinite normalized prices',()=>{assert.deepEqual(normalize(series([['2025-01',0],['2025-02',1]])).values,[]);});
+test('asset comparison aligns both ending and beginning dates without filling gaps',()=>{
+ const a=series([['2025-01',100],['2025-02',105],['2025-03',110],['2025-04',115]]);
+ const b=series([['2025-01',200],['2025-03',230],['2025-04',240],['2025-05',250]]);
+ const aligned=commonObservations([a,b]);
+ assert.deepEqual(aligned.map(s=>latest(s)[0]),['2025-04','2025-04']);
+ assert.deepEqual(aligned.map(s=>change(s,3).from),['2025-01','2025-01']);
+ assert.equal(change({...aligned[0],values:aligned[0].values.slice(0,-1)},1),null);
+ assert.equal(a.values.length,4);assert.equal(latest(b)[0],'2025-05');
+ assert.deepEqual(commonObservations([a,{...b,frequency:'Q'}]),[]);
+ assert.equal(latest(commonObservations([a,series([['2024-12',1]])])[0]),null);
+});
+test('daily comparisons use the same prior common business day',()=>{
+ const a=series([['2025-03-27',1],['2025-03-28',2],['2025-04-30',3]],'D');
+ const b=series([['2025-03-27',4],['2025-04-30',5]],'D');
+ assert.deepEqual(commonObservations([a,b]).map(s=>change(s,1).from),['2025-03-27','2025-03-27']);
+});
+test('converted prices trace every input and inherit failed dependencies',()=>{
+ const gold={...series([['2025-01',100]]),id:'gold',label:'黄金'};
+ const fx={...series([['2025-01',7]]),id:'fx',currency:'CNY',source:{status:'retained'}};
+ const cpi={...series([['2025-01',140]]),id:'cpi',unit:'2010=100'};
+ const result=convertMonthly(gold,fx,cpi);
+ assert.deepEqual(provenance(result).map(p=>p.id),['gold','fx','cpi']);
+ assert.equal(result.values[0][2],'derived');assert.match(result.note,/2010=100/);
+ assert.match(freshness(result,new Date('2025-02-01')),/失败/);
+ assert.equal(convertMonthly(gold,series([['2025-01',0]])),null);
+ assert.equal(convertMonthly(gold,fx,series([['2025-01',0]])),null);
+ assert.equal(convertMonthly(gold,{...fx,frequency:'D'}),null);
+ const derived={...gold,inputs:['fx']};assert.match(freshness(derived,new Date('2025-02-01'),new Map([['fx',fx]])),/失败/);
+});
+test('retained historical source parts remain visible in series health',()=>{
+ const s={...series([['2025-01',1]]),sourceParts:[{status:'retained'},{status:'ok'}]};
+ assert.match(freshness(s,new Date('2025-02-01')),/失败/);
+ const years={...series([['2024-12-31',1],['2025-10-01',2]],'D'),sourceParts:[{dataset:'US Treasury:nominal:2024'},{dataset:'US Treasury:nominal:2025'}]};
+ assert.deepEqual(provenance(years).map(p=>p.latestPeriod),['2024-12-31','2025-10-01']);
+});
+test('chart cursor selects an actual period and clamps at either end',()=>{
+ const times=[10,20,40];assert.equal(nearestIndex(times,0),0);assert.equal(nearestIndex(times,45),2);
+ assert.equal(nearestIndex(times,31),2);assert.equal(nearestIndex(times,30),1);assert.equal(nearestIndex([],1),-1);
+});
+test('long chart histories do not create a DOM node per observation; forecasts stay dashed',()=>{
+ resetCharts();
+ const s={...series(Array.from({length:10000},(_,i)=>[new Date(Date.UTC(1990,0,i+1)).toISOString().slice(0,10),100+i]),'D'),displayName:'测试 <script>',color:'#123456',source:{name:'Test'}};
+ const html=renderChart([s]);assert.equal((html.match(/<circle/g)||[]).length,1);assert.match(html,/type="range"/);assert.ok(!html.includes('测试 <script>'));
+ const forecast=renderChart([{...s,frequency:'A',values:[['2025',1],['2026',2,'forecast']]}]);assert.match(forecast,/stroke-dasharray="5 5"/);
+});
 test('stale annual data and source errors are not labeled current',()=>{
  assert.match(freshness(series([['2020',1]],'A'),new Date('2026-10-13')),/滞后/);
  assert.match(freshness({...series([['2026-10-12',1]],'D'),source:{status:'retained'}},new Date('2026-10-13')),/失败/);
