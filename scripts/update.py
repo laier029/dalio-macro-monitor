@@ -496,6 +496,43 @@ def write_atomic(path,data):
     tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(data,ensure_ascii=False,separators=(',',':'),allow_nan=False)+'\n');tmp.replace(path)
 
 
+def series_changes(previous, current):
+    """Compare actual periods, keeping forecasts and coverage changes explicit."""
+    if not previous:return []  # First ingestion establishes a baseline.
+    before={s['id']:s for s in previous};after={s['id']:s for s in current};changes=[]
+    def forecast(point):return bool(point and len(point)>2 and point[2]=='forecast')
+    def coverage(series):
+        values=series['values']
+        return dict(first=values[0][0],last=values[-1][0],count=len(values),forecasts=sum(forecast(p) for p in values))
+    def basis(series):return {k:series.get(k) for k in ('unit','currency','frequency')}
+    for key in sorted(before.keys()|after.keys()):
+        old,new=before.get(key),after.get(key);item=new or old
+        change={k:item[k] for k in ('id','label','area','unit','currency','frequency')}
+        change.update(previousSource=copy.deepcopy(old['source']) if old else None,source=copy.deepcopy(new['source']) if new else None)
+        if not old or not new:
+            change.update(kind='coverage-added' if new else 'coverage-removed',coverage=coverage(item),points=[])
+        elif basis(old)!=basis(new):
+            # Values expressed in different units are not economic revisions.
+            change.update(kind='basis-changed',beforeBasis=basis(old),afterBasis=basis(new),points=[])
+        else:
+            old_points={p[0]:p for p in old['values']};new_points={p[0]:p for p in new['values']};points=[]
+            last_observed=max((p[0] for p in old['values'] if not forecast(p)),default='')
+            for period in sorted(old_points.keys()|new_points.keys(),reverse=True):
+                b,a=old_points.get(period),new_points.get(period)
+                if b==a:continue
+                if b is None:kind='forecast-added' if forecast(a) else 'new-observation' if period>last_observed else 'historical-backfill'
+                elif a is None:kind='forecast-removed' if forecast(b) else 'observation-removed'
+                elif forecast(b) and not forecast(a):kind='forecast-realized'
+                elif not forecast(b) and forecast(a):kind='observation-to-forecast'
+                elif b[1]==a[1]:kind='status-changed'
+                else:kind='forecast-revision' if forecast(a) else 'historical-revision'
+                points.append(dict(period=period,kind=kind,before=copy.deepcopy(b),after=copy.deepcopy(a)))
+            if not points:continue
+            change.update(kind='observations',points=points)
+        changes.append(change)
+    return changes
+
+
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--offline',action='store_true');args=parser.parse_args()
     CACHE.mkdir(exist_ok=True);old=json.loads(OUT.read_text()) if OUT.exists() else {'series':[]}
@@ -528,16 +565,13 @@ def main():
         if s.get('inputs') and any(byid[k]['source']['status']!='ok' for k in s['inputs']):s['source']['status']='retained'
     data=dict(schemaVersion=1,generatedAt=NOW.isoformat(),areas=AREAS,series=sorted(series,key=lambda s:s['id']),sources=sources)
     validate(data)
-    previous={s['id']:s for s in old['series']}; changes=[]
-    for s in data['series']:
-        prior=previous.get(s['id'])
-        if prior and prior['values']!=s['values']:
-            changes.append(dict(id=s['id'],label=s['label'],area=s['area'],before=prior['values'][-1],after=s['values'][-1],historicalRevision=prior['values'][-1]==s['values'][-1]))
+    changes=series_changes(old['series'],data['series'])
     history_path=ROOT/'site/data/updates.json'
     history=json.loads(history_path.read_text()) if history_path.exists() else []
     if changes or not history:
-        history.insert(0,dict(date=NOW.isoformat(),baseline=not bool(previous),changes=changes))
-    write_atomic(OUT,data);write_atomic(history_path,history[:90])
+        history.insert(0,dict(schemaVersion=2,date=NOW.isoformat(),baseline=not bool(old['series']),changes=changes))
+    history=history[:90]
+    write_atomic(OUT,data);write_atomic(history_path,history)
     # Weekly digest: exact changes since Monday, rather than rebranding quarter changes as weekly news.
     monday=(NOW-dt.timedelta(days=NOW.weekday())).date().isoformat()
     weekly=dict(weekStart=monday,generatedAt=NOW.isoformat(),runs=[r for r in history if r['date'][:10]>=monday],sourcesFailed=[s['dataset'] for s in sources if s['status']!='ok'])

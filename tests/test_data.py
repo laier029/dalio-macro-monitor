@@ -163,4 +163,69 @@ class DataTests(unittest.TestCase):
                 self.assertEqual(actual[key]['source']['status'],'retained',key)
             self.assertTrue(all(s['status']=='retained' for s in rebuilt['sources']))
 
+    def journal_series(self, values, **overrides):
+        return dict(id='US.test',label='测试',area='US',unit='%',currency='USD',frequency='A',values=values,source={'name':'Test','dataset':'test','status':'ok'},**overrides)
+
+    def test_journal_records_actual_revised_period_behind_unchanged_forecast(self):
+        old=self.journal_series([['2024',1],['2025',2,'historical-estimate'],['2031',3,'forecast']])
+        new=copy.deepcopy(old);new['values'][1][1]=2.2
+        changes=update.series_changes([old],[new]);p=changes[0]['points']
+        self.assertEqual(p,[dict(period='2025',kind='historical-revision',before=['2025',2,'historical-estimate'],after=['2025',2.2,'historical-estimate'])])
+        self.assertEqual(old['values'][1][1],2)
+
+    def test_journal_separates_forecast_revisions_realizations_and_flag_changes(self):
+        old=self.journal_series([['2024',1],['2025',2,'forecast'],['2026',3,'forecast'],['2027',4,'forecast']])
+        new=self.journal_series([['2024',1,'historical-estimate'],['2025',2.1,'historical-estimate'],['2026',3.2,'forecast'],['2028',5,'forecast']])
+        points={p['period']:p for p in update.series_changes([old],[new])[0]['points']}
+        self.assertEqual({k:v['kind'] for k,v in points.items()},{'2024':'status-changed','2025':'forecast-realized','2026':'forecast-revision','2027':'forecast-removed','2028':'forecast-added'})
+        self.assertIsNone(points['2027']['after']);self.assertIsNone(points['2028']['before'])
+
+    def test_journal_distinguishes_new_history_backfill_and_withdrawal(self):
+        old=self.journal_series([['2023',0],['2025',2]])
+        new=self.journal_series([['2024',1],['2025',2],['2026',0]])
+        points={p['period']:p for p in update.series_changes([old],[new])[0]['points']}
+        self.assertEqual([points[k]['kind'] for k in ['2023','2024','2026']],['observation-removed','historical-backfill','new-observation'])
+        self.assertEqual(points['2026']['after'][1],0)
+
+    def test_journal_first_baseline_and_metadata_refresh_are_not_market_news(self):
+        old=self.journal_series([['2025',1]])
+        self.assertEqual(update.series_changes([],[old]),[])
+        new=copy.deepcopy(old);new['source'].update(fetchedAt='later',status='retained',error='outage')
+        self.assertEqual(update.series_changes([old],[new]),[])
+
+    def test_journal_reports_coverage_and_incompatible_units_separately(self):
+        old=self.journal_series([['2025',1]])
+        added=copy.deepcopy(old);added['id']='HK.test'
+        changes=update.series_changes([old],[old,added]);self.assertEqual(changes[0]['kind'],'coverage-added');self.assertEqual(changes[0]['points'],[])
+        self.assertEqual(update.series_changes([old,added],[old])[0]['kind'],'coverage-removed')
+        new=copy.deepcopy(old);new['unit']='百分点';new['values'][0][1]=100
+        self.assertEqual(update.series_changes([old],[new])[0]['kind'],'basis-changed')
+
+    def test_journal_preserves_every_changed_point_and_source_snapshot(self):
+        old=self.journal_series([[str(1800+i),i] for i in range(120)])
+        new=copy.deepcopy(old)
+        for p in new['values']:p[1]+=1
+        new['source']['sha256']='new-hash'
+        changes=update.series_changes([old],[new]);self.assertEqual(len(changes[0]['points']),120)
+        new['source']['sha256']='changed-after-comparison'
+        self.assertEqual(changes[0]['source']['sha256'],'new-hash')
+
+    def test_refresh_writes_period_changes_and_keeps_weekly_history_in_sync(self):
+        values=copy.deepcopy([s for s in self.data['series'] if not s.get('inputs')])
+        item=next(s for s in values if s['id']=='US.debt_P');item['values'][0][1]+=1
+        period=item['values'][0][0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);out=root/'site/data/dashboard.json';out.parent.mkdir(parents=True)
+            out.write_text(json.dumps(self.data))
+            records=[dict(date=update.NOW.isoformat(),baseline=False,changes=[]) for _ in range(90)]
+            (out.parent/'updates.json').write_text(json.dumps(records))
+            job=('Test','https://example.gov','json',None)
+            with patch.object(update,'ROOT',root),patch.object(update,'CACHE',root/'.cache'),patch.object(update,'OUT',out),patch.object(update,'specs',return_value=[job]),patch.object(update,'fetch',return_value=(values,{'dataset':'Test','status':'ok'})),patch('sys.argv',['update.py']),patch('builtins.print'):
+                update.main()
+            history=json.loads((out.parent/'updates.json').read_text());weekly=json.loads((out.parent/'weekly.json').read_text())
+            self.assertEqual(len(history),90);self.assertEqual(history,weekly['runs'])
+            self.assertEqual(history[0]['schemaVersion'],2)
+            point=next(c for c in history[0]['changes'] if c['id']=='US.debt_P')['points'][0]
+            self.assertEqual(point['period'],period);self.assertEqual(point['kind'],'historical-revision')
+
 if __name__=='__main__':unittest.main()

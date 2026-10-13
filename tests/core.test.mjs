@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {latest,observed,change,periodDate,normalize,convertMonthly,freshness,commonObservations,nearestIndex,provenance} from '../site/core.mjs';
 import {renderChart,resetCharts} from '../site/charts.mjs';
+import {releaseTotals,renderRunChanges,renderPointChanges} from '../site/releases.mjs';
 const series=(values,frequency='M')=>({values,frequency,source:{status:'ok'},currency:'USD',unit:'美元/盎司'});
 test('forecast is not the latest historical observation',()=>{
  const s=series([['2025',2,'historical-estimate'],['2026',3,'forecast']],'A');
@@ -88,4 +89,25 @@ test('all shipped series are safe to use with the client',()=>{
  for(const s of d.series){assert.ok(latest(s),s.id);for(const p of s.values)assert.ok(Number.isFinite(p[1]),s.id);assert.ok(Number.isFinite(+periodDate(latest(s)[0])),s.id);}
  assert.equal(d.series.find(s=>s.id==='DE.policy').source.key,d.series.find(s=>s.id==='XM.policy').source.key);
  assert.equal(d.series.some(s=>s.id==='CN.dsr_H'),false);
+});
+test('release counts separate forecasts, historical observations, coverage and legacy records',()=>{
+ const run={changes:[{kind:'observations',points:[{kind:'historical-revision'},{kind:'forecast-revision'},{kind:'forecast-realized'},{kind:'status-changed'}]},{kind:'coverage-added'},{historicalRevision:true}]};
+ assert.deepEqual(releaseTotals([run]),{series:3,history:2,forecast:1,status:1,coverage:1,legacy:1});
+});
+test('release details retain real zero and small revisions, with honest missing values',()=>{
+ const change={kind:'observations',unit:'%',currency:'USD',points:[{period:'2025',kind:'historical-revision',before:['2025',1.00000001],after:['2025',1.00000002]},{period:'2026',kind:'new-observation',before:null,after:['2026',0]}]};
+ const html=renderPointChanges(change);
+ assert.match(html,/1\.00000001/);assert.match(html,/1\.00000002/);assert.match(html,/0<small>来源公布值/);assert.match(html,/未有记录/);
+});
+test('release pagination exposes every changed period without rendering hidden full histories',()=>{
+ const change={kind:'observations',points:Array.from({length:120},(_,i)=>({period:String(1900+i),kind:'historical-revision',before:[String(1900+i),0],after:[String(1900+i),1]}))};
+ const first=renderPointChanges(change),last=renderPointChanges(change,2);
+ assert.equal((first.match(/<tr>/g)||[]).length,51);assert.equal((last.match(/<tr>/g)||[]).length,21);
+ assert.match(first,/1900/);assert.doesNotMatch(first,/2019/);assert.match(last,/2019/);assert.match(last,/共 120 条/);
+ const run=renderRunChanges({changes:[{...change,area:'US',label:'恶意 <script>'}]},{US:'美国'});
+ assert.doesNotMatch(run,/<table/);assert.match(run,/&lt;script&gt;/);
+});
+test('legacy history revisions never fabricate the changed period from identical endpoints',()=>{
+ const html=renderPointChanges({historicalRevision:true,before:['2031',999],after:['2031',999]});
+ assert.match(html,/未记录实际修订/);assert.doesNotMatch(html,/999/);
 });
