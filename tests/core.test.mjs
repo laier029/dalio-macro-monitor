@@ -111,3 +111,8 @@ test('legacy history revisions never fabricate the changed period from identical
  const html=renderPointChanges({historicalRevision:true,before:['2031',999],after:['2031',999]});
  assert.match(html,/未记录实际修订/);assert.doesNotMatch(html,/999/);
 });
+test('export provenance retains source definitions and excluded quarters',()=>{
+ const input={...series([['2026-Q1',1]],'Q'),id:'HK.currency',definition:'外币计价外债',note:'分项核对不一致时留空',excludedPeriods:['2016-Q1','2016-Q2']};
+ const proof=JSON.parse(JSON.stringify(provenance(input)))[0];
+ assert.deepEqual(proof.excludedPeriods,['2016-Q1','2016-Q2']);assert.equal(proof.definition,input.definition);assert.equal(proof.note,input.note);
+});

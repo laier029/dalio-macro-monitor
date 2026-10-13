@@ -9,6 +9,17 @@ import tempfile
 def fiscal_payload(rows):
     return json.dumps(dict(data=rows,meta={'total-count':len(rows),'total-pages':1})).encode()
 
+def qeds_fixture():
+    amounts={'DT.DOD.DECT.CD.AR.US':100e9,'DT.DOD.DSTC.CD.US':40e9,
+        'DT.DOD.DECT.CD.GG.AR.US':20e9,'DT.DOD.DECT.CD.MA.AR.US':20e9,
+        'DT.DOD.DECT.CD.CB.AR.US':20e9,'DT.DOD.DECT.CD.OT.AR.US':20e9,'DT.DOD.DECT.CD.IL.US':20e9,
+        'DT.DOD.DECT.CD.FC.US':70e9,'DT.DOD.DECT.CD.DC.US':30e9,
+        'DT.DOD.DECT.CD.AR.EA.US':120e9,'DT.DOD.DECT.CD.AR.NE.US':-20e9}
+    return [dict(indicator={'id':key},country={'id':country},countryiso3code='',date='2025Q4',value=amount,obs_status='') for country in ['USA','CHN','HKG','JPN','DEU','FRA'] for key,amount in amounts.items()]
+
+def qeds_payload(rows):
+    return json.dumps([{'pages':1,'total':len(rows),'lastupdated':'2026-08-07'},rows]).encode()
+
 def maturity_fixture():
     classes=[('Bills Maturity Value','Total Unmatured Treasury Bills','2026-10-31',100),
         ('Notes','Total Unmatured Treasury Notes','2027-09-30',200),
@@ -34,6 +45,50 @@ class DataTests(unittest.TestCase):
 
     def test_snapshot_invariants(self):
         self.assertTrue(update.validate(self.data))
+
+    def test_qeds_quarters_units_country_ids_and_negative_net_debt(self):
+        result=update.qeds_series(qeds_payload(qeds_fixture()),{'url':'https://example.gov','status':'ok'})
+        byid={s['id']:s for s in result}
+        self.assertEqual(byid['HK.external_debt']['values'],[['2025-Q4',100]])
+        self.assertEqual(byid['HK.external_debt']['currency'],'USD')
+        self.assertEqual(byid['HK.external_net_debt']['values'],[['2025-Q4',-20]])
+        ratios=update.external_ratios(result)
+        self.assertEqual(len(ratios),6);self.assertTrue(all(s['values']==[['2025-Q4',40,'derived']] for s in ratios))
+        self.assertNotIn('XM.external_debt',byid)
+
+    def test_qeds_incompatible_currency_zeroes_and_net_assets_are_not_real_zeroes(self):
+        rows=qeds_fixture()
+        for r in rows:
+            if r['country']['id']=='HKG' and r['indicator']['id'] in ['DT.DOD.DECT.CD.FC.US','DT.DOD.DECT.CD.DC.US','DT.DOD.DECT.CD.AR.EA.US','DT.DOD.DECT.CD.AR.NE.US']:r['value']=0
+        ids={s['id'] for s in update.qeds_series(qeds_payload(rows),{})}
+        self.assertIn('HK.external_debt',ids);self.assertNotIn('HK.external_foreign_currency',ids);self.assertNotIn('HK.external_net_debt',ids)
+
+    def test_qeds_currency_unknowns_and_reported_negative_residuals_are_preserved(self):
+        rows=qeds_fixture();template=next(r for r in rows if r['country']['id']=='DEU')
+        for r in rows:
+            if r['country']['id']=='DEU' and r['indicator']['id']=='DT.DOD.DECT.CD.DC.US':r['value']+=1e6
+        rows.append(dict(template,indicator={'id':'DT.DOD.DECT.CD.UC.US'},value=-1e6))
+        items={s['id']:s for s in update.qeds_series(qeds_payload(rows),{})}
+        self.assertEqual(items['DE.external_unallocated_currency']['values'],[['2025-Q4',-.001,'source-discrepancy']])
+        self.assertNotIn('HK.external_unallocated_currency',items)
+
+    def test_qeds_rejects_partial_duplicate_future_and_inconsistent_sector_responses(self):
+        rows=qeds_fixture();bad=json.loads(qeds_payload(rows));bad[0]['total']+=1
+        with self.assertRaisesRegex(ValueError,'Incomplete'):update.qeds_series(json.dumps(bad).encode(),{})
+        with self.assertRaisesRegex(ValueError,'Duplicate'):update.qeds_series(qeds_payload(rows+rows[:1]),{})
+        future=copy.deepcopy(rows);future[0]['date']='2099Q4'
+        with self.assertRaisesRegex(ValueError,'Future'):update.qeds_series(qeds_payload(future),{})
+        bad=copy.deepcopy(rows);bad[0]['value']+=1e9
+        with self.assertRaisesRegex(ValueError,'does not reconcile'):update.qeds_series(qeds_payload(bad),{})
+        with self.assertRaisesRegex(ValueError,'core coverage missing'):update.qeds_series(qeds_payload([r for r in rows if r['country']['id']!='HKG']),{})
+
+    def test_external_short_ratio_requires_same_quarter_and_never_uses_annual_reserves(self):
+        result=update.qeds_series(qeds_payload(qeds_fixture()),{'status':'ok'})
+        debt=next(s for s in result if s['id']=='US.external_debt');short=next(s for s in result if s['id']=='US.external_short')
+        short['values']=[['2025-Q3',1],['2025-Q4',40]]
+        ratio=update.external_ratios([debt,short])[0]
+        self.assertEqual(ratio['values'],[['2025-Q4',40,'derived']])
+        self.assertEqual(ratio['inputs'],['US.external_short','US.external_debt'])
 
     def test_maturity_profile_cannot_disagree_with_history_total(self):
         bad=copy.deepcopy(self.data)
