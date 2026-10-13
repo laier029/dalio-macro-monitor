@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {latest,observed,change,periodDate,normalize,convertMonthly,freshness,commonObservations,nearestIndex,provenance} from '../site/core.mjs';
+import {latest,observed,change,periodDate,normalize,convertMonthly,freshness,commonObservations,nearestIndex,provenance,countryViewHash,readCountryView} from '../site/core.mjs';
 import {renderChart,resetCharts} from '../site/charts.mjs';
 import {releaseTotals,renderRunChanges,renderPointChanges} from '../site/releases.mjs';
 const series=(values,frequency='M')=>({values,frequency,source:{status:'ok'},currency:'USD',unit:'美元/盎司'});
@@ -115,4 +115,18 @@ test('export provenance retains source definitions and excluded quarters',()=>{
  const input={...series([['2026-Q1',1]],'Q'),id:'HK.currency',definition:'外币计价外债',note:'分项核对不一致时留空',excludedPeriods:['2016-Q1','2016-Q2']};
  const proof=JSON.parse(JSON.stringify(provenance(input)))[0];
  assert.deepEqual(proof.excludedPeriods,['2016-Q1','2016-Q2']);assert.equal(proof.definition,input.definition);assert.equal(proof.note,input.note);
+});
+test('regional links restore the chosen metric, full history and explicit forecasts',()=>{
+ const view={area:'HK',countryMetric:'gdp_growth',years:0,forecasts:true};
+ const hash=countryViewHash(view);
+ assert.equal(hash,'#countries/HK?metric=gdp_growth&years=0&forecasts=1');
+ assert.deepEqual(readCountryView(hash.split('?')[1],new Set(['gdp_growth','debt_P'])),{countryMetric:'gdp_growth',years:0,forecasts:true});
+ assert.equal(countryViewHash({...view,years:5,forecasts:false}),'#countries/HK?metric=gdp_growth&years=5');
+});
+test('unavailable metrics and invalid link controls fall back to a valid historical view',()=>{
+ const metrics=new Set(['debt_P','external_debt']);
+ for(const query of ['', 'metric=not_available&years=-1&forecasts=true','metric=%3Cscript%3E&years=&forecasts=0','years=1000000']){
+  assert.deepEqual(readCountryView(query,metrics),{countryMetric:'debt_P',years:10,forecasts:false});
+ }
+ assert.deepEqual(readCountryView('metric=external_debt&years=5',metrics),{countryMetric:'external_debt',years:5,forecasts:false});
 });
