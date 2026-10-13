@@ -240,7 +240,28 @@ def derived(series):
     return out
 
 
-def fetch(spec, offline=False):
+def validate_source_coverage(current, previous, dataset):
+    """Reject partial responses that would silently remove established coverage."""
+    new={s['id']:s for s in current}
+    for old in previous:
+        if old.get('inputs'):
+            continue
+        parts=old.get('sourceParts',[old['source']])
+        if not any(p['dataset']==dataset for p in parts):
+            continue
+        if old['id'] not in new:
+            raise ValueError('Source response lost existing series: '+old['id'])
+        before=old['values']
+        if dataset.startswith('US Treasury:'):
+            before=[p for p in before if p[0].startswith(dataset.split(':')[-1])]
+        after=new[old['id']]['values']
+        if before and after[-1][0]<before[-1][0]:
+            raise ValueError('Source latest period moved backwards: '+old['id'])
+        if len(before)>24 and len(after)<len(before)*.8:
+            raise ValueError('Source history unexpectedly contracted: '+old['id'])
+
+
+def fetch(spec, offline=False, previous=None):
     name,url,ext,parser=spec;path=CACHE/(name+'.'+ext)
     if offline:
         raw=path.read_bytes();fetched=dt.datetime.fromtimestamp(path.stat().st_mtime,dt.timezone.utc).isoformat()
@@ -251,6 +272,7 @@ def fetch(spec, offline=False):
     src=dict(name=name.split(':')[0],dataset=name,url=url,download=url,fetchedAt=fetched,sha256=hashlib.sha256(raw).hexdigest(),status='ok',releaseDate=None)
     data=parser(raw,src)
     if not data:raise ValueError('No selected series: check schema/coverage')
+    validate_source_coverage(data,previous or [],name)
     if not offline:path.write_bytes(raw)
     return data,dict(src,seriesCount=len(data))
 
@@ -319,7 +341,7 @@ def main():
     CACHE.mkdir(exist_ok=True);old=json.loads(OUT.read_text()) if OUT.exists() else {'series':[]}
     jobs=specs(args.offline);series=[];sources=[]
     def collect(spec):
-        try:return spec,fetch(spec,args.offline),None
+        try:return spec,fetch(spec,args.offline,old['series']),None
         except Exception as e:return spec,None,str(e)
     with ThreadPoolExecutor(max_workers=4) as pool:
         for spec,result,error in pool.map(collect,jobs):
