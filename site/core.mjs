@@ -39,6 +39,15 @@ export function nearestIndex(sortedTimes,time) {
   while(lo<hi){const mid=Math.floor((lo+hi)/2);if(sortedTimes[mid]<time)lo=mid+1;else hi=mid;}
   return lo>0&&time-sortedTimes[lo-1]<=sortedTimes[lo]-time?lo-1:lo;
 }
+export function countryViewHash({area,countryMetric,years,forecasts}) {
+  const query=new URLSearchParams({metric:countryMetric,years:String(years)});
+  if(forecasts)query.set('forecasts','1');
+  return `#countries/${encodeURIComponent(area)}?${query}`;
+}
+export function readCountryView(search,metrics) {
+  const query=new URLSearchParams(search),metric=query.get('metric'),years=query.get('years');
+  return {countryMetric:metrics.has(metric)?metric:'debt_P',years:['0','5','10'].includes(years)?Number(years):10,forecasts:query.get('forecasts')==='1'};
+}
 export function provenance(series,lookup=new Map()) {
   const inputs=series.dependencies||series.inputs?.map(id=>lookup.get(id)).filter(Boolean);
   return (inputs?.length?inputs:[series]).flatMap(input=>(input.sourceParts||[input.source]).map(source=>({

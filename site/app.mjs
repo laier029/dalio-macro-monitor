@@ -1,4 +1,4 @@
-import {observed,latest,periodDate,change,commonObservations,convertMonthly,freshness,provenance} from './core.mjs';
+import {observed,latest,periodDate,change,commonObservations,convertMonthly,freshness,provenance,countryViewHash,readCountryView} from './core.mjs';
 import {renderChart,bindCharts,resetCharts} from './charts.mjs';
 import {releaseTotals,renderRunChanges,renderPointChanges} from './releases.mjs';
 
@@ -78,11 +78,12 @@ function externalPosition(area){
 function countries(){
   const a=state.area,area=areaIndex.get(a),all=data.series.filter(t=>t.area===a&&!['fx_monthly'].includes(t.metric));
   if(!s(a,state.countryMetric||''))state.countryMetric='debt_P';const item=s(a,state.countryMetric);
+  if(!item.forecastFrom)state.forecasts=false;
   const pillars=[['政府 · 长期负担','debt_revenue','存量 / 一年财政收入'],['政府 · 当期现金流','interest_revenue','净利息 / 财政收入'],['央行 · 资产规模','cb_assets','并非单独的政策松紧指标'],['私人部门 · 偿债','dsr_P','与自身历史比较']];
   return heading('REGIONAL OBSERVATORY',area.name,'把政府、央行与私人部门放在同一张观察地图上。',area.en)+
   `<div class="country-tabs">${data.areas.map(b=>`<a href="#countries/${b.id}" class="${a===b.id?'active':''}">${b.name}</a>`).join('')}</div><div class="notice">${area.note}</div><div class="pillars">${pillars.map(([title,m,note])=>`<section class="pillar"><div class="overline">${title}</div><strong>${fmt(latest(s(a,m))?.[1])}<small style="display:inline;margin-left:3px">${e(s(a,m)?.unit||'')}</small></strong><p>${e(s(a,m)?.label||'BIS 未覆盖合计偿债率')}</p><small>${latest(s(a,m))?.[0]||'未提供'} · ${note}</small></section>`).join('')}</div>`+
   (a==='US'?funding():'')+externalPosition(a)+
-  `<section class="panel panel-pad">${panelHead('EXPLORE / HISTORY','地区指标浏览','选择指标查看趋势、定义与原始观察值')}<div class="controls"><label class="control">指标<select id="country-metric">${Object.entries(groupNames).map(([g,name])=>{const options=all.filter(t=>t.group===g);return options.length?`<optgroup label="${name}">${options.map(t=>`<option value="${t.metric}" ${t.metric===state.countryMetric?'selected':''}>${e(t.label)}</option>`).join('')}</optgroup>`:'';}).join('')}</select></label>${rangeControls()}${item.forecastFrom?`<label class="inline-check"><input type="checkbox" id="show-forecasts" ${state.forecasts?'checked':''}>显示来源预测（虚线）</label>`:''}</div><div class="value-row"><p class="subtitle">${e(item.label)} · ${e(item.unit)}</p><strong>${fmt(latest(item)?.[1],2)}<small> ${latest(item)?.[0]}</small></strong></div>${chart([item],{height:280})}<p class="asset-note">${e(item.note)}</p>${showSource(item)}</section>`+
+  `<section class="panel panel-pad">${panelHead('EXPLORE / HISTORY','地区指标浏览','选择指标查看趋势、定义与原始观察值；复制浏览器地址可分享当前指标与历史窗口')}<div class="controls"><label class="control">指标<select id="country-metric">${Object.entries(groupNames).map(([g,name])=>{const options=all.filter(t=>t.group===g);return options.length?`<optgroup label="${name}">${options.map(t=>`<option value="${t.metric}" ${t.metric===state.countryMetric?'selected':''}>${e(t.label)}</option>`).join('')}</optgroup>`:'';}).join('')}</select></label>${rangeControls()}${item.forecastFrom?`<label class="inline-check"><input type="checkbox" id="show-forecasts" ${state.forecasts?'checked':''}>显示来源预测（虚线）</label>`:''}</div><div class="value-row"><p class="subtitle">${e(item.label)} · ${e(item.unit)}</p><strong>${fmt(latest(item)?.[1],2)}<small> ${latest(item)?.[0]}</small></strong></div>${chart([item],{height:280})}<p class="asset-note">${e(item.note)}</p>${showSource(item)}</section>`+
   `<div class="two-col"><section class="panel panel-pad">${panelHead('LONG & SHORT','长短期观察线索','证据优先，不给出合成风险分数')}<div class="watch-item"><h3>政府长期</h3><p>毛债务相对财政收入：${fmt(latest(s(a,'debt_revenue'))?.[1])}%。应结合经济增长、财政收入结构、债务币种与投资者需求。</p></div><div class="watch-item"><h3>政府短期</h3><p>净利息 / 收入：${fmt(latest(s(a,'interest_revenue'))?.[1])}%。${a==='US'?'上方已接入联邦国债到期安排及持有大类；一般政府净利息口径不同，不能与联邦到期本金直接相加。未来赤字、拍卖和持有人细分仍待补充。':'到期本金、总融资需求、持有人与拍卖数据尚未完整接入，因此不能据此判断未来 12 个月续借压力。'}</p></div><div class="watch-item"><h3>央行与私人部门</h3><p>央行资产 / GDP：${fmt(latest(s(a,'cb_assets'))?.[1])}%；政策利率：${fmt(latest(s(a,'policy'))?.[1],2)}%。央行损益和利率重定价情景仍待补充。私人偿债率：${fmt(latest(s(a,'dsr_P'))?.[1])}%。</p></div></section><section class="panel panel-pad">${panelHead('COVERAGE / AVAILABLE','本地区数据目录',`${all.length} 条已接入序列 · 点击切换上方图表`)}<div class="series-list">${all.map(t=>`<div class="mini-row"><button class="table-button" data-metric="${e(t.metric)}">${e(t.label)}</button><small>${latest(t)?.[0]||'仅预测'}<br>${freshness(t)}</small></div>`).join('')}</div></section></div>`;
 }
 function assetSeries(){
@@ -172,9 +173,21 @@ function render(scroll=true){
  const labels={overview:'全球概览',countries:'地区详情',assets:'资产观察',updates:'更新记录',methods:'方法与来源'};
  document.title=labels[state.route]+' · 全球宏观观察';$('#breadcrumb').textContent=labels[state.route];
  $$('.sidebar nav a').forEach(a=>{const on=a.dataset.route===state.route;a.classList.toggle('active',on);on?a.setAttribute('aria-current','page'):a.removeAttribute('aria-current');});
- $('#main').innerHTML=({overview,countries,assets,updates,methods}[state.route])();bind();if(scroll)window.scrollTo(0,0);else if(focusSelector)$(focusSelector)?.focus({preventScroll:true});
+ $('#main').innerHTML=({overview,countries,assets,updates,methods}[state.route])();
+ if(state.route==='countries')window.history.replaceState(null,'',countryViewHash(state));
+ bind();if(scroll)window.scrollTo(0,0);else if(focusSelector)$(focusSelector)?.focus({preventScroll:true});
 }
-function route(){const [page,arg]=location.hash.slice(1).split('/');state.route=['overview','countries','assets','updates','methods'].includes(page)?page:'overview';if(state.route==='countries'&&areaIndex.has(arg))state.area=arg;if(state.route==='assets'&&['commodity','fx','property','rates'].includes(arg))state.asset=arg;render();}
+function route(){
+ const [path,search='']=location.hash.slice(1).split('?'),[page,arg]=path.split('/');
+ state.route=['overview','countries','assets','updates','methods'].includes(page)?page:'overview';
+ if(state.route==='countries'){
+  state.area=areaIndex.has(arg)?arg:arg?'US':state.area;
+  const metrics=new Set(data.series.filter(item=>item.area===state.area&&item.metric!=='fx_monthly').map(item=>item.metric));
+  Object.assign(state,readCountryView(search,metrics));
+ }
+ if(state.route==='assets'&&['commodity','fx','property','rates'].includes(arg))state.asset=arg;
+ render();
+}
 async function init(){
  try{[data,weekly,history]=await Promise.all(['dashboard','weekly','updates'].map(async n=>{const r=await fetch(`data/${n}.json`);if(!r.ok)throw new Error(n+': '+r.status);return r.json();}));index=new Map(data.series.map(x=>[x.id,x]));areaIndex=new Map(data.areas.map(x=>[x.id,x]));
  const age=(Date.now()-new Date(data.generatedAt))/86400000,fail=data.sources.filter(x=>x.status!=='ok').length;$('#freshness').innerHTML=`<span class="dot ${fail||age>3?'warning':''}"></span>${age>3?'快照已 '+Math.floor(age)+' 天未更新':fail?fail+' 项来源需检查':'来源已检查'} · ${data.generatedAt.slice(0,10)}`;
