@@ -1,10 +1,11 @@
-import {observed,latest,periodDate,change,normalize,convertMonthly,freshness} from './core.mjs';
+import {observed,latest,periodDate,change,commonObservations,convertMonthly,freshness,provenance} from './core.mjs';
+import {renderChart,bindCharts,resetCharts} from './charts.mjs';
 
 let data, weekly, history, index, areaIndex;
 const exportIndex=new Map();
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const colors={US:'#2d7862',CN:'#c89748',HK:'#698fa6',JP:'#9b6680',XM:'#7e8f42',DE:'#526aa0',FR:'#ac7b5d',WORLD:'#2d7862'};
-const assetColors=['#2d7862','#bd964e','#688da0','#9b6680'];
+const assetColors=['#2d7862','#bd964e','#688da0','#9b6680','#626ab0'];
 const frequency={D:'日度',M:'月度',Q:'季度',A:'年度'};
 const groupNames={income:'收入与经济',debt:'部门债务',service:'偿债负担',fiscal:'财政收支',policy:'货币政策',external:'对外缓冲',bank:'银行状况',property:'住宅价格',order:'长期背景',fx:'汇率',rates:'融资市场',commodity:'商品价格'};
 const state={route:'overview',area:'US',metric:'debt_P',years:10,forecasts:false,selected:new Set(['US','CN','HK','JP','XM']),asset:'commodity',currency:'USD',real:false};
@@ -25,45 +26,16 @@ function sliceSeries(series,years=state.years) {
   return {...series,values};
 }
 function chart(list,{height=250,normalizeBase=false,years=state.years}={}) {
-  let lines=list.filter(Boolean).map((v,i)=>({...sliceSeries(v,years),color:v.color||colors[v.area]||assetColors[i%4]})).filter(v=>v.values.length);
-  if(normalizeBase && lines.length){
-    // Rebase only after intersecting observation periods. No forward-fill across holidays or quarters.
-    const common=lines.map(l=>new Set(l.values.map(p=>p[0]))).reduce((a,b)=>new Set([...a].filter(x=>b.has(x))));
-    lines=lines.map(l=>normalize({...l,values:l.values.filter(p=>common.has(p[0]))})).filter(l=>l.values.length);
-  }
-  if(!lines.length)return '<div class="chart-empty">这个时间范围没有可比较的数据。</div>';
-  const W=window.innerWidth<=680?Math.max(280,window.innerWidth-70):740,H=height,L=42,R=24,T=22,B=32;
-  const all=lines.flatMap(l=>l.values),dates=all.map(p=>+periodDate(p[0]));
-  let xmin=Math.min(...dates),xmax=Math.max(...dates),ymin=Math.min(...all.map(p=>p[1])),ymax=Math.max(...all.map(p=>p[1]));
-  if(ymax===ymin){ymax+=1;ymin-=1;}const pad=(ymax-ymin)*.12;ymax+=pad;ymin-=pad;
-  const x=p=>L+(+periodDate(p)-xmin)/(xmax-xmin||1)*(W-L-R),y=v=>T+(ymax-v)/(ymax-ymin)*(H-T-B);
-  let markup=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${e(lines.map(l=>areaName(l.area)+' '+l.label).join('、'))}历史趋势"><title>${e(lines.map(l=>l.label).join(' / '))} · ${normalizeBase?'共同期初=100':e(lines[0].unit)}</title>`;
-  for(let i=0;i<5;i++){const v=ymin+(ymax-ymin)*i/4,yy=y(v);markup+=`<line class="grid" x1="${L}" x2="${W-R}" y1="${yy}" y2="${yy}"/><text x="${L-8}" y="${yy+3}" text-anchor="end">${fmt(v,Math.abs(v)<10?1:0)}</text>`;}
-  for(let i=0;i<5;i++){const t=xmin+(xmax-xmin)*i/4,d=new Date(t),xx=L+(W-L-R)*i/4;markup+=`<text x="${xx}" y="${H-7}" text-anchor="middle">${d.getUTCFullYear()}${xmax-xmin<86400000*900?'-'+String(d.getUTCMonth()+1).padStart(2,'0'):''}</text>`;}
-  for(const l of lines){
-    const pts=l.values;
-    // Break paths at missing regular periods and at the historical/forecast boundary.
-    let path='',last=null,oldForecast=false;
-    const flush=()=>{if(path)markup+=`<path class="series-line" stroke="${l.color}" ${oldForecast?'stroke-dasharray="5 5"':''} d="${path}"/>`;path='';};
-    for(const p of pts){const forecast=p[2]==='forecast',gap=last&&(periodDate(p[0])-periodDate(last[0]))/86400000>({D:10,M:40,Q:105,A:370}[l.frequency]);
-      if(forecast!==oldForecast||gap){flush();if(last&&!gap)path=`M${x(last[0])},${y(last[1])} `;}
-      path+=`${path?'L':'M'}${x(p[0]).toFixed(2)},${y(p[1]).toFixed(2)} `;oldForecast=forecast;last=p;
-    }flush();
-    const end=pts.at(-1);markup+=`<circle cx="${x(end[0])}" cy="${y(end[1])}" r="3" fill="${l.color}"/><text x="${x(end[0])-5}" y="${y(end[1])-9}" text-anchor="end" style="fill:${l.color};font-size:10px">${fmt(end[1],1)}</text>`;
-    // Native tooltips on all points; raw values remain accessible in the data table.
-    for(const p of pts)markup+=`<circle class="point" cx="${x(p[0])}" cy="${y(p[1])}" r="4" fill="${l.color}"><title>${e(areaName(l.area))} · ${p[0]} · ${fmt(p[1],2)} ${e(l.unit)}${p[2]==='forecast'?' · 预测':''}</title></circle>`;
-  }
-  markup+='</svg>';
-  const lastDates=[...new Set(lines.map(l=>l.values.at(-1)[0]))].join(' / ');
-  return `<div class="chart">${markup}</div><p class="chart-caption">${normalizeBase?'共同观察期起点 = 100 · ':''}${e(lines[0].source.name)}${new Set(lines.map(l=>l.source.name)).size>1?' 等':''} · 截至 ${e(lastDates)} · ${all.some(p=>p[2]==='forecast')?'虚线为预测 · ':''}图表留断点，不补造缺失值</p>`;
+  const lines=list.filter(Boolean).map((v,i)=>({...sliceSeries(v,years),color:v.color||colors[v.area]||assetColors[i%assetColors.length],displayName:['commodity','rates'].includes(v.group)?v.label:areaName(v.area)+(list.length===1?' · '+v.label:'')}));
+  return renderChart(lines,{height,normalizeBase,width:window.innerWidth<=680?Math.max(280,window.innerWidth-70):740});
 }
 function rangeControls(){return `<div class="segmented" aria-label="历史窗口">${[5,10,0].map(v=>`<button data-years="${v}" class="${v===state.years?'selected':''}" aria-pressed="${v===state.years}">${v?v+' 年':'全部'}</button>`).join('')}</div>`;}
 function legendAreas(){return `<div class="legend">${data.areas.map(a=>`<label><input type="checkbox" data-area="${a.id}" ${state.selected.has(a.id)?'checked':''}><i style="background:${colors[a.id]}"></i>${a.name}</label>`).join('')}</div>`;}
 function showSource(item){
   if(!item)return '<p class="notice amber">来源没有覆盖这一项，或接口尚待验证。空值不表示零风险。</p>';
   exportIndex.set(item.id,item);
-  const p=latest(item),src=item.source;
-  return `<details class="detail-source"><summary>口径、来源与原始数值</summary><div class="series-meta"><div>单位：<b>${e(item.unit)}</b> · 币种：<b>${e(item.currency)}</b></div><div>频率：<b>${frequency[item.frequency]}</b> · 最新历史期：<b>${p?.[0]}</b></div><div>来源版本：${e(src.vintage||'来源当前修订版本')}</div><div>发布日期：${e(src.releaseDate||'来源未提供独立发布日期')}</div><div>抓取时间：${stamp(src.fetchedAt)}</div><div>状态：${freshness(item)}${src.providerModified?' · 源更新 '+e(src.providerModified):''}</div></div><p>${e(item.definition)}</p><p>${e(item.note)}</p><p><a href="${e(src.url)}" target="_blank" rel="noopener">官方数据下载 ↗</a> · <span class="code">${e(src.key)}</span></p>${item.forecastFrom?`<p>${item.forecastFrom} 年起为来源预测／估计。此前历史值也可能含估算，不能用于“当时已知”的无前视回测。</p>`:''}<div class="export-row"><button class="download" data-export="${e(item.id)}">下载该序列 CSV</button><span>下表显示最新 12 个历史观察值</span></div><div class="table-wrap"><table><thead><tr><th>观察期</th><th>数值（${e(item.unit)}）</th><th>标记</th></tr></thead><tbody>${observed(item).slice(-12).reverse().map(p=>`<tr><td>${p[0]}</td><td>${fmt(p[1],4)}</td><td>${p[2]?'历史/估计，可能修订':'来源公布值，可能修订'}</td></tr>`).join('')}</tbody></table></div></details>`;
+  const p=latest(item),src=item.source,inputs=provenance(item,index),derived=!!item.inputs;
+  return `<details class="detail-source"><summary>${derived?'计算口径、输入来源与数值':'口径、来源与原始数值'}</summary><div class="series-meta"><div>单位：<b>${e(item.unit)}</b> · 币种：<b>${e(item.currency)}</b></div><div>频率：<b>${frequency[item.frequency]}</b> · 最新历史期：<b>${p?.[0]||'无共同期'}</b></div><div>来源版本：${e(src.vintage||'来源当前修订版本')}</div><div>状态：${freshness(item,new Date(),index)}</div></div><p>${e(item.definition)}</p><p>${e(item.note)}</p>${derived?`<div class="calculation-note"><strong>项目计算</strong><p>${e(item.formula||item.definition)}</p><small>只使用输入序列的共同观察期。输入最新期可能比计算结果更晚。</small></div>`:''}<div class="provenance-list">${inputs.map(input=>`<article class="provenance-item"><div><strong>${e(input.label)}</strong><small>${e(input.unit)} · ${frequency[input.frequency]} · 最新历史期 ${e(input.latestPeriod||'—')}</small></div><p><a href="${e(input.source.url)}" target="_blank" rel="noopener">${e(input.source.name)} · ${e(input.source.dataset)} ↗</a></p><p>来源键：<span class="code">${e(input.source.key)}</span></p><p>抓取：${stamp(input.source.fetchedAt)} · ${input.source.status==='ok'?'读取成功':'更新失败，保留旧值'}${input.source.vintage?' · '+e(input.source.vintage):''}</p><p>发布日期：${e(input.source.releaseDate||'来源未提供独立发布日期')}${input.source.providerModified?' · 源更新 '+e(input.source.providerModified):''}</p>${input.source.sha256?`<small class="code">源文件 SHA-256：${e(input.source.sha256)}</small>`:''}</article>`).join('')}</div>${item.forecastFrom?`<p>${item.forecastFrom} 年起为来源预测／估计。此前历史值也可能含估算，不能用于“当时已知”的无前视回测。</p>`:''}<div class="export-row"><button class="download" data-export="${e(item.id)}">下载该序列 CSV</button><span>导出当前币种与口径的完整序列，含公式及全部输入来源；下表为最新 12 期历史值</span></div><div class="table-wrap"><table><thead><tr><th>观察期</th><th>数值（${e(item.unit)}）</th><th>标记</th></tr></thead><tbody>${observed(item).slice(-12).reverse().map(p=>`<tr><td>${p[0]}</td><td>${fmt(p[1],4)}</td><td>${derived?'项目计算'+(p[2]==='historical-estimate'?' · 基于历史/估计':''):p[2]==='historical-estimate'?'历史/估计，可能修订':'来源公布值，可能修订'}</td></tr>`).join('')}</tbody></table></div></details>`;
 }
 function trendNotes(){
   return ['CN','US','JP'].map((a,i)=>{const debt=s(a,'debt_P'),dsr=s(a,'dsr_P'),c=change(debt,12,'pp'),d=change(dsr,12,'pp');return `<div class="watch-item"><span class="number">0${i+1}</span><h3>${areaName(a)} · 私人部门</h3><p class="reading">信用 / GDP 同比 ${c?signed(c.value)+' 个百分点':'比较期不足'}。</p><p>可用于观察信用相对收入的变化。另看偿债率同比 ${d?signed(d.value)+' 个百分点':'暂无可比数据'}，两项不一致时不合并为危机判断。</p><small>${latest(debt)?.[0]} · BIS · 与一年前比较</small></div>`;}).join('');
@@ -88,20 +60,23 @@ function countries(){
   `<div class="two-col"><section class="panel panel-pad">${panelHead('LONG & SHORT','长短期观察线索','证据优先，不给出合成风险分数')}<div class="watch-item"><h3>政府长期</h3><p>毛债务相对财政收入：${fmt(latest(s(a,'debt_revenue'))?.[1])}%。应结合经济增长、财政收入结构、债务币种与投资者需求。</p></div><div class="watch-item"><h3>政府短期</h3><p>净利息 / 收入：${fmt(latest(s(a,'interest_revenue'))?.[1])}%。到期本金、总融资需求、持有人与拍卖数据尚未完整接入，因此不能据此判断未来 12 个月续借压力。</p></div><div class="watch-item"><h3>央行与私人部门</h3><p>央行资产 / GDP：${fmt(latest(s(a,'cb_assets'))?.[1])}%；政策利率：${fmt(latest(s(a,'policy'))?.[1],2)}%。央行损益和利率重定价情景仍待补充。私人偿债率：${fmt(latest(s(a,'dsr_P'))?.[1])}%。</p></div></section><section class="panel panel-pad">${panelHead('COVERAGE / AVAILABLE','本地区数据目录',`${all.length} 条已接入序列 · 点击切换上方图表`)}<div class="series-list">${all.map(t=>`<div class="mini-row"><button class="table-button" data-metric="${e(t.metric)}">${e(t.label)}</button><small>${latest(t)?.[0]||'仅预测'}<br>${freshness(t)}</small></div>`).join('')}</div></section></div>`;
 }
 function assetSeries(){
-  if(state.asset==='commodity')return ['gold','brent','copper','silver'].map((m,i)=>{let t=s('WORLD',m);if(state.currency!=='USD'||state.real)t=convertMonthly(t,s({USD:'US',CNY:'CN',EUR:'XM',JPY:'JP',HKD:'HK'}[state.currency],'fx_monthly'),state.real?s({USD:'US',CNY:'CN',EUR:'XM',JPY:'JP',HKD:'HK'}[state.currency],'cpi'):null);return t?{...t,color:assetColors[i]}:null;}).filter(Boolean);
+  if(state.asset==='commodity')return ['gold','brent','copper','silver'].map((m,i)=>{let t=s('WORLD',m);if(state.real&&!s({USD:'US',CNY:'CN',EUR:'XM',JPY:'JP',HKD:'HK'}[state.currency],'cpi'))return null;if(state.currency!=='USD'||state.real)t=convertMonthly(t,s({USD:'US',CNY:'CN',EUR:'XM',JPY:'JP',HKD:'HK'}[state.currency],'fx_monthly'),state.real?s({USD:'US',CNY:'CN',EUR:'XM',JPY:'JP',HKD:'HK'}[state.currency],'cpi'):null);return t?{...t,color:assetColors[i]}:null;}).filter(Boolean);
   if(state.asset==='fx')return ['CN','HK','JP','XM'].map(a=>s(a,'fx'));
   if(state.asset==='property')return data.areas.map(a=>s(a.id,state.real?'house_real':'house_price'));
-  return ['yield_3m','yield_2y','yield_10y','yield_30y','real_yield_10y'].map((m,i)=>({...s('US',m),color:assetColors[i%4]})).filter(t=>t.id);
+  return ['yield_3m','yield_2y','yield_10y','yield_30y','real_yield_10y'].map((m,i)=>({...s('US',m),color:assetColors[i%assetColors.length]})).filter(t=>t.id);
 }
 function assets(){
-  const types={commodity:'黄金与商品',fx:'外汇',property:'住宅价格',rates:'国债与 TIPS'};const list=assetSeries();
+  const types={commodity:'黄金与商品',fx:'外汇',property:'住宅价格',rates:'国债与 TIPS'};const list=assetSeries(),aligned=commonObservations(list),commonDate=latest(aligned[0])?.[0];
+  const delayed=list.filter(t=>latest(t)?.[0]===commonDate).map(t=>['property','fx'].includes(state.asset)?areaName(t.area):t.label);
+  const alignmentNote=commonDate&&list.some(t=>latest(t)?.[0]!==commonDate)?`为对齐 ${delayed.join('、')} 的最新期，共同比较截至 ${commonDate}。其他来源已有更晚数据，各自最新期列在表内，完整数值可在下方来源展开查看。`:'';
+  const changeMode=state.asset==='rates'?'bps':state.asset==='fx'?'fx':'percent';
   const notes={commodity:`月均价格，同币种、共同观察期比较。${state.real?'经消费物价指数调整的价格变化，不含持有成本。':'原始序列为美元名义价格。'}若来源月份不同，图表只保留共同月份。`,fx:'报价为本币 / 1 美元。下表变化按本币对美元的升贬值计算；正数表示本币升值。图表按报价本身归一化，上行表示本币贬值。',property:'住宅价格指数，不含租金、杠杆与交易成本。季度序列不计算 1 个月涨跌。各地住宅覆盖范围不同。',rates:'到期收益率（%）；变化单位为基点 bp。TIPS 为实际收益率，其他为名义收益率。均不是债券投资回报。'};
   return heading('ASSETS & PURCHASING POWER','资产与购买力','先对齐频率、计价货币和价格口径，再解释变化。')+
   `<div class="asset-type" aria-label="资产类别">${Object.entries(types).map(([k,v])=>`<button data-asset="${k}" class="${state.asset===k?'selected':''}" aria-pressed="${state.asset===k}">${v}</button>`).join('')}</div><div class="notice">${notes[state.asset]}</div><section class="panel panel-pad">${panelHead('COMPARE / COMMON BASIS',types[state.asset]+'比较',state.asset==='rates'?'收益率水平 · %':'共同观察期起点 = 100')}
   <div class="controls">${rangeControls()}${state.asset==='commodity'?`<label class="control">计价货币<select id="asset-currency">${['USD','CNY','EUR','JPY','HKD'].map(c=>`<option ${state.currency===c?'selected':''}>${c}</option>`).join('')}</select></label>`:''}${['commodity','property'].includes(state.asset)?`<label class="inline-check"><input id="real-prices" type="checkbox" ${state.real?'checked':''}>消费物价调整</label>`:''}</div>
-  ${chart(list,{height:280,normalizeBase:state.asset!=='rates'})}<div class="legend">${list.map(t=>`<span style="font-size:11px"><i style="background:${t.color||colors[t.area]}"></i> ${state.asset==='property'||state.asset==='fx'?areaName(t.area):t.label}</span>`).join('')}</div></section>
-  <section class="panel"><div class="panel-pad" style="padding-bottom:0">${panelHead('PERIOD CHANGE','近期变化',state.asset==='rates'?'利率变化 · bp':'价格或本币价值变化 · %，每格可查看比较起止期')}</div><div class="table-wrap"><table class="asset-matrix"><thead><tr><th>观察对象</th><th>最新值</th><th>近 1 月</th><th>近 3 月</th><th>近 12 月</th><th>观察期</th></tr></thead><tbody>${list.map(t=>`<tr><td>${state.asset==='property'||state.asset==='fx'?areaName(t.area):e(t.label)}<small>${e(t.unit)}</small></td><td class="mono">${fmt(latest(t)?.[1],2)}</td>${[1,3,12].map(n=>changeCell(change(t,n,state.asset==='rates'?'bps':state.asset==='fx'?'fx':'percent'),state.asset==='rates'?' bp':'%')).join('')}<td>${latest(t)?.[0]||'—'}<small>${frequency[t.frequency]} · ${freshness(t)}</small></td></tr>`).join('')}</tbody></table></div><p class="asset-note panel-pad">各行起止期以各自来源为准，不能作为同一天的可交易回报排名。日期未对齐或对应期缺失时显示“—”。</p></section>
-  <section class="panel panel-pad">${panelHead('TRACE / SOURCES','资产数据来源','展开查看原始序列；币种转换与平减由本项目计算')}${list.map(t=>`<h3 class="mt">${state.asset==='property'||state.asset==='fx'?areaName(t.area)+' · ':''}${e(t.label)}</h3>${showSource(t)}`).join('')}</section>
+  ${chart(aligned,{height:280,normalizeBase:state.asset!=='rates'})}<div class="legend">${list.map(t=>`<span style="font-size:11px"><i style="background:${t.color||colors[t.area]}"></i> ${state.asset==='property'||state.asset==='fx'?areaName(t.area):t.label}</span>`).join('')}</div></section>
+  <section class="panel"><div class="panel-pad" style="padding-bottom:0">${panelHead('PERIOD CHANGE','近期变化',`共同观察期：${commonDate||'无共同期'} · ${state.asset==='rates'?'利率变化 · bp':'价格或本币价值变化 · %'}`)}</div><div class="table-wrap" tabindex="0" role="region" aria-label="资产变化表，可横向滚动"><table class="asset-matrix"><thead><tr><th>观察对象</th><th>共同期数值</th>${[1,3,12].map(n=>`<th>近 ${n} 月<small>起点 ${change(aligned[0],n,changeMode)?.from||'—'}</small></th>`).join('')}<th>观察期</th></tr></thead><tbody>${aligned.map(t=>`<tr><td>${state.asset==='property'||state.asset==='fx'?areaName(t.area):e(t.label)}<small>${e(t.unit)}</small></td><td class="mono">${fmt(latest(t)?.[1],2)}</td>${[1,3,12].map(n=>changeCell(change(t,n,changeMode),state.asset==='rates'?' bp':'%')).join('')}<td>${latest(t)?.[0]||'—'}<small>${frequency[t.frequency]} · 源最新 ${latest(list.find(x=>x.id===t.id))?.[0]||'—'}<br>${freshness(list.find(x=>x.id===t.id))}</small></td></tr>`).join('')}</tbody></table></div><p class="asset-note panel-pad">${alignmentNote?e(alignmentNote)+'<br>':''}各行使用相同结束期；比较起点也限定在所有行均有数据的观察期。日度可回溯至目标日前 10 天内的共同发布日；对应期缺失显示“—”。完整序列与各自最新期见下方来源。价格变化不等于可交易总回报。</p></section>
+  <section class="panel panel-pad">${panelHead('TRACE / SOURCES','资产数据来源','展开查看当前口径的完整序列、输入来源与计算公式')}${list.map(t=>`<h3 class="mt">${state.asset==='property'||state.asset==='fx'?areaName(t.area)+' · ':''}${e(t.label)}</h3>${showSource(t)}`).join('')}</section>
   <div class="notice amber"><strong>尚未接入：</strong>股票指数、现金持有回报、长债与 TIPS 总回报、股债相关性。待确认公开展示授权与复权／总回报口径后接入；目前不以收益率或未复权价格代替这些回报。无历史预期数据时，不将增长、通胀的实际变化称为“经济意外”。</div>`;
 }
 const modules=[
@@ -131,8 +106,16 @@ function updates(){
  `<section class="panel panel-pad">${panelHead('THIS WEEK',`${weekly.weekStart} 起的本周概览`,'以北京时间显示抓取时间；周界按 UTC 周一计算')}<div class="notice">${entries.length?`本周记录到 ${entries.length} 次序列变化。`:'本周尚无基线之后的序列变化。'} ${history.some(h=>h.baseline)?'已建立首份快照，后续更新将从该基线比较。':''}</div>${weekly.sourcesFailed.length?`<div class="notice amber">需检查的来源：${e(weekly.sourcesFailed.join('、'))}</div>`:''}${entries.length?`<div class="table-wrap"><table><thead><tr><th>地区 / 指标</th><th>上次记录</th><th>本次记录</th><th>类型</th></tr></thead><tbody>${entries.map(c=>`<tr><td><a href="#countries/${c.area}">${areaName(c.area)} · ${e(c.label)}</a></td><td>${fmt(c.before[1],2)}<small>${c.before[0]}</small></td><td>${fmt(c.after[1],2)}<small>${c.after[0]}</small></td><td>${c.historicalRevision?'历史修订':c.before[0]===c.after[0]?'同观察期修订':'新观察期'}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty-state">此处只显示真实发生的数据更新。<br>可以先在全球概览查看各指标的最新历史趋势。</div>'}</section>`+
  `<section class="panel panel-pad">${panelHead('SNAPSHOT HISTORY','数据变更记录','每日检查 · 周内自动汇总 · 保存最近 90 次变更记录')}${history.map(r=>`<div class="mini-row"><div>${stamp(r.date)}<small style="display:block">${r.baseline?'首次基线，不生成周变化判断':r.changes.length+' 条序列变动'}</small></div><span class="tag">${r.baseline?'基线':'更新'}</span></div>`).join('')}<p class="asset-note">GitHub Actions 每日 01:35 UTC（北京时间 09:35）尝试刷新；平台可能延迟调度。连续无活动的公开仓库可能停用定时任务。来源失败时保留旧值，不更新成零。<a href="https://github.com/laier029/dalio-macro-monitor/actions">查看运行记录 ↗</a></p></section>`;
 }
-function exportCsv(id){const series=exportIndex.get(id)||index.get(id);if(!series)return;const quote=v=>`"${String(v??'').replaceAll('"','""')}"`;const rows=[['地区','指标','观察期','数值','单位','标记','来源','来源版本','抓取时间'],...series.values.map(p=>[areaName(series.area),series.label,p[0],p[1],series.unit,p[2]||'source-reported',series.source.url,series.source.vintage||'',series.source.fetchedAt])];const blob=new Blob(['\ufeff'+rows.map(r=>r.map(quote).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=id+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+function exportCsv(id){
+ const series=exportIndex.get(id)||index.get(id);if(!series)return;
+ const quote=v=>`"${String(v??'').replaceAll('"','""')}"`,sources=provenance(series,index);
+ const formula=series.inputs?(series.formula||series.definition):'';
+ const rows=[['地区','指标','观察期','数值','单位','币种','标记','计算公式','输入来源与快照（JSON）'],...series.values.map(p=>[areaName(series.area),series.label,p[0],p[1],series.unit,series.currency,[series.inputs?'derived':'',p[2]||'source-reported'].filter(Boolean).filter((x,i,a)=>a.indexOf(x)===i).join(';'),formula,JSON.stringify(sources)])];
+ const blob=new Blob(['\ufeff'+rows.map(r=>r.map(quote).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');
+ a.href=url;a.download=id+(series.dependencies?'-'+series.currency+(state.real?'-CPI':''):'')+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
 function bind(){
+ bindCharts();
  $$('[data-years]').forEach(b=>b.addEventListener('click',()=>{state.years=+b.dataset.years;render(false);}));
  $$('[data-area]').forEach(c=>c.addEventListener('change',()=>{c.checked?state.selected.add(c.dataset.area):state.selected.delete(c.dataset.area);render(false);}));
  $('#overview-metric')?.addEventListener('change',ev=>{state.metric=ev.target.value;render(false);});
@@ -145,11 +128,13 @@ function bind(){
  $$('[data-export]').forEach(b=>b.addEventListener('click',()=>exportCsv(b.dataset.export)));
 }
 function render(scroll=true){
- exportIndex.clear();
+ const focused=document.activeElement,focusId=focused?.id,focusData=focused?.dataset;
+ const focusSelector=focusId?'#'+CSS.escape(focusId):focused?.matches('[data-years]')?`[data-years="${focusData.years}"]`:focused?.matches('[data-area]')?`[data-area="${focusData.area}"]`:null;
+ exportIndex.clear();resetCharts();
  const labels={overview:'全球概览',countries:'地区详情',assets:'资产观察',updates:'更新记录',methods:'方法与来源'};
  document.title=labels[state.route]+' · 全球宏观观察';$('#breadcrumb').textContent=labels[state.route];
  $$('.sidebar nav a').forEach(a=>{const on=a.dataset.route===state.route;a.classList.toggle('active',on);on?a.setAttribute('aria-current','page'):a.removeAttribute('aria-current');});
- $('#main').innerHTML=({overview,countries,assets,updates,methods}[state.route])();bind();if(scroll)window.scrollTo(0,0);
+ $('#main').innerHTML=({overview,countries,assets,updates,methods}[state.route])();bind();if(scroll)window.scrollTo(0,0);else if(focusSelector)$(focusSelector)?.focus({preventScroll:true});
 }
 function route(){const [page,arg]=location.hash.slice(1).split('/');state.route=['overview','countries','assets','updates','methods'].includes(page)?page:'overview';if(state.route==='countries'&&areaIndex.has(arg))state.area=arg;if(state.route==='assets'&&['commodity','fx','property','rates'].includes(arg))state.asset=arg;render();}
 async function init(){
