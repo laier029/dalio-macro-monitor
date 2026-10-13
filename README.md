@@ -81,6 +81,10 @@ python -m http.server 8766 --directory site
 
 官方定义：[MSPD](https://fiscaldata.treasury.gov/datasets/monthly-statement-public-debt/)、[平均利率](https://fiscaldata.treasury.gov/datasets/average-interest-rates-treasury-securities/)、[API 与使用许可](https://fiscaldata.treasury.gov/api-documentation/)。
 
+## 地区指标链接
+
+选择地区指标、5 年/10 年/全部历史窗口，或切换来源预测后，浏览器地址会保存当前视图。复制地址即可分享或收藏；刷新页面会恢复选择。无效指标或窗口参数回退到可用的历史视图，不执行网址中的内容。
+
 ## 对外债务与资产口径
 
 QEDS SDDS（World Bank API 来源 22）覆盖美国、中国内地、香港、日本、德国、法国。欧元区不由成员国加总替代。所有余额按来源美元数值除以十亿展示；原始期限短债占比仅使用同季度分子与分母。外债按非居民债权人划分，不等于外币债务，也不再叠加 BIS 部门信用。
