@@ -53,6 +53,21 @@ WDI = {
     'FB.BNK.CAPA.ZS': ('bank_capital','银行资本 / 资产','%','bank',1),
     'NY.GDP.PCAP.PP.KD': ('gdp_per_capita','人均实际 GDP · PPP','2021 国际元','order',1),
 }
+QEDS = {
+    'DT.DOD.DECT.CD.AR.US': ('external_debt','对外债务总额','居民对非居民承担的债务负债；涵盖各部门，本币和外币均可计入。'),
+    'DT.DOD.DSTC.CD.US': ('external_short','短期外债 · 原始期限','原始期限一年及以内的外债。不是剩余期限一年内到期额，不含长期债务下一年的到期本金。'),
+    'DT.DOD.DECT.CD.GG.AR.US': ('external_government','一般政府外债','一般政府对非居民的债务负债；不是政府全部债务。'),
+    'DT.DOD.DECT.CD.MA.AR.US': ('external_central_bank','中央银行／货币当局外债','中央银行或货币当局对非居民的债务负债。'),
+    'DT.DOD.DECT.CD.CB.AR.US': ('external_banks','吸收存款机构外债','吸收存款机构（不含中央银行）对非居民的债务负债。'),
+    'DT.DOD.DECT.CD.OT.AR.US': ('external_other','其他部门外债','其他部门对非居民的债务负债；直接投资企业间借贷另列。'),
+    'DT.DOD.DECT.CD.IL.US': ('external_intercompany','直接投资企业间借贷','直接投资关系下的企业间债务负债；不与其他部门重复相加。'),
+    'DT.DOD.DECT.CD.FC.US': ('external_foreign_currency','外币计价外债','对非居民负债中以外币计价的部分；外债与外币债务不是同一概念。'),
+    'DT.DOD.DECT.CD.DC.US': ('external_domestic_currency','本币计价外债','对非居民负债中以本币计价的部分。'),
+    'DT.DOD.DECT.CD.UC.US': ('external_unallocated_currency','币种未分配外债','来源单独报告的币种未分配部分；未报告不填零。'),
+    'DT.DOD.DECT.CD.AR.EA.US': ('external_debt_assets','对外债务工具资产','居民对非居民持有的债务工具资产；不等于全部对外资产，不含股权等非债务工具。'),
+    'DT.DOD.DECT.CD.AR.NE.US': ('external_net_debt','净外债 · 债务工具','外债总额减去对外债务工具资产。负数表示债务工具净债权；不是国际投资头寸净值，不代表财政可动用现金。'),
+}
+QEDS_AREAS={'US','CN','HK','JP','DE','FR'}
 
 
 def numeric(value):
@@ -181,6 +196,77 @@ def wdi_series(key, raw, source):
         s['note']={'reserves':'含黄金按美元计价，估值变化不等于净干预或资金流；不等于财政可动用资产。','npl':'年度报送，覆盖和贷款分类标准可能不同；不插值成实时银行压力。','bank_capital':'资本与总资产比率，不是风险加权资本充足率。','gdp_per_capita':'购买力平价的人均产出，仅作长期收入背景；不是劳动生产率或国力总分。'}[metric]
         if metric=='reserves':s['currency']='USD'
         result.append(s)
+    return result
+
+
+def qeds_series(raw, source):
+    payload=json.loads(raw)
+    if not isinstance(payload,list) or len(payload)!=2 or payload[0].get('pages')!=1:
+        raise ValueError('Unexpected QEDS shape/pagination')
+    meta,rows=payload
+    if not isinstance(rows,list) or len(rows)!=meta.get('total'):raise ValueError('Incomplete QEDS response')
+    grouped={};seen=set()
+    for row in rows:
+        key=row['indicator']['id'];area=ISO.get(row.get('countryiso3code') or row['country']['id'])
+        if key not in QEDS or area not in QEDS_AREAS:continue
+        date=row['date']
+        if not re.fullmatch(r'\d{4}Q[1-4]',date):raise ValueError('QEDS quarterly date required')
+        period=date[:4]+'-'+date[4:];identity=(area,key,period)
+        if identity in seen:raise ValueError('Duplicate QEDS observation')
+        seen.add(identity)
+        if row['value'] is None:continue
+        value=numeric(row['value'])
+        if value is None or (value<0 and QEDS[key][0] not in ['external_net_debt','external_unallocated_currency']):raise ValueError('Invalid QEDS amount')
+        if period_end(period)>NOW.date():raise ValueError('Future QEDS observation')
+        if period>='2000':grouped.setdefault((area,period),{})[QEDS[key][0]]=(value,row.get('obs_status',''))
+    series_points={};excluded={}
+    sectors=['external_government','external_central_bank','external_banks','external_other','external_intercompany']
+    currencies=['external_foreign_currency','external_domestic_currency','external_unallocated_currency']
+    net=['external_debt_assets','external_net_debt']
+    for (area,period),items in grouped.items():
+        value=lambda metric:items[metric][0]
+        total=value('external_debt') if 'external_debt' in items else None
+        tolerance=max(1e6,abs(total or 0)*1e-6)
+        if total is not None and all(k in items for k in sectors):
+            if abs(sum(value(k) for k in sectors)-total)>tolerance:raise ValueError('QEDS sector total does not reconcile')
+        currency_valid=total is not None and all(k in items for k in currencies[:2]) and abs(sum(value(k) for k in currencies if k in items)-total)<=tolerance
+        net_valid=total is not None and all(k in items for k in net) and abs(total-value(net[0])-value(net[1]))<=tolerance
+        for metric,(amount,flag) in items.items():
+            if (metric in currencies and not currency_valid) or (metric in net and not net_valid):
+                excluded.setdefault((area,metric),[]).append(period);continue
+            point=[period,round(amount/1e9,6)]
+            if amount<0 and metric=='external_unallocated_currency':point.append('source-discrepancy')
+            elif flag:point.append(flag)
+            series_points.setdefault((area,metric),[]).append(point)
+    for area in QEDS_AREAS:
+        if not all((area,k) in series_points for k in ['external_debt','external_short']+sectors):
+            raise ValueError('QEDS core coverage missing: '+area)
+    result=[]
+    for key,(metric,label,definition) in QEDS.items():
+        for area in sorted(QEDS_AREAS):
+            pts=series_points.get((area,metric))
+            if not pts:continue
+            item=make_series(area,metric,label,'十亿美元','Q','external',pts,dict(source,key=key,providerModified=meta.get('lastupdated')))
+            item.update(currency='USD',definition=definition,note='World Bank / IMF QEDS，来源美元金额除以十亿。外债按债权人居住地划分；存量变化含汇率、估值和其他调整，不等于跨境资金净流量。')
+            if metric in currencies+net:item['note']+=' 仅展示分项与同季总外债核对一致的季度；未通过核对的源表零值不作为真实零余额。'
+            if metric=='external_unallocated_currency':item['note']+=' 少数历史原值为负，原样保留并标记；不解释为负的外币债务。'
+            if (area,metric) in excluded:
+                item['excludedPeriods']=sorted(excluded[area,metric]);item['note']+=f' 本序列有 {len(item["excludedPeriods"])} 期未通过上述一致性检查，缺期留空。'
+            result.append(item)
+    return result
+
+
+def external_ratios(series):
+    lookup={s['id']:s for s in series};result=[]
+    for area in QEDS_AREAS:
+        debt=lookup.get(area+'.external_debt');short=lookup.get(area+'.external_short')
+        if not debt or not short:continue
+        denominator={p[0]:p[1] for p in debt['values']}
+        pts=[[p[0],round(p[1]/denominator[p[0]]*100,6),'derived'] for p in short['values'] if denominator.get(p[0],0)>0]
+        if not pts:continue
+        item=make_series(area,'external_short_share','短期外债占比 · 原始期限','%','Q','external',pts,dict(debt['source'],key='derived:external_short_share'))
+        item.update(currency='不适用',inputs=[short['id'],debt['id']],definition='同季度原始期限一年及以内的外债 ÷ 总外债 × 100。',note='项目计算。不是未来一年到期的外债比例，也不直接与年度储备计算覆盖率。')
+        result.append(item)
     return result
 
 
@@ -433,6 +519,8 @@ def specs(offline=False):
     for key in WDI:
         url=f'https://api.worldbank.org/v2/country/USA;CHN;HKG;JPN;DEU;FRA;EMU/indicator/{key}?format=json&per_page=10000'
         jobs.append((f'World Bank:{key}',url,'json',lambda raw,s,k=key:wdi_series(k,raw,s)))
+    qeds_url='https://api.worldbank.org/v2/country/USA;CHN;HKG;JPN;DEU;FRA/indicator/'+';'.join(QEDS)+'?source=22&frequency=Q&format=json&per_page=20000'
+    jobs.append(('World Bank:QEDS',qeds_url,'json',qeds_series))
     # Discover the current monthly workbook link, which can change each year.
     landing='https://www.worldbank.org/en/research/commodity-markets'
     body=b'' if offline else subprocess.run(['curl','-fLsS','--max-time','40',landing],capture_output=True).stdout
@@ -558,7 +646,7 @@ def main():
                         item['source']=dict(part,status='retained',error=error,checkedAt=NOW.isoformat());retained.append(item)
                 series.extend(retained);sources.append(dict(name=name.split(':')[0],dataset=name,url=url,status='retained' if retained else 'error',error=error,checkedAt=NOW.isoformat(),seriesCount=len(retained)))
                 print(f'WARNING {name}: {error}',flush=True)
-    series=merge_treasury(series);series.extend(derived(series))
+    series=merge_treasury(series);series.extend(derived(series));series.extend(external_ratios(series))
     # Preserve errors from any dependency, not just the first numerator.
     byid={s['id']:s for s in series}
     for s in series:

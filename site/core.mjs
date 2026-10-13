@@ -43,6 +43,7 @@ export function provenance(series,lookup=new Map()) {
   const inputs=series.dependencies||series.inputs?.map(id=>lookup.get(id)).filter(Boolean);
   return (inputs?.length?inputs:[series]).flatMap(input=>(input.sourceParts||[input.source]).map(source=>({
     id:input.id,label:input.label,unit:input.unit,frequency:input.frequency,
+    definition:input.definition,note:input.note,excludedPeriods:input.excludedPeriods,
     latestPeriod:input.sourceParts?observed(input).filter(p=>p[0].startsWith(source.dataset?.split(':').at(-1))).at(-1)?.[0]:input.latestPeriod||latest(input)?.[0],source
   })));
 }

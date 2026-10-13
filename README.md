@@ -12,6 +12,7 @@
 - BIS 分部门信用、偿债率、央行资产、利率、汇率、CPI 与房价。
 - IMF WEO 经济指标、Fiscal Monitor 财政指标，预测与历史/估计分离。
 - 同一财政版本计算的政府净利息/收入及债务/收入。
+- 世界银行/IMF QEDS：六地季度外债、部门分项与原始期限短债；通过核对的币种分项、对外债务工具资产和净外债。
 - 世界银行年度国际储备、银行指标、人均实际 GDP 与月度商品价格。
 - 美国财政部国债/TIPS 收益率；同频资产价格变化、月均币种换算及 CPI 调整。
 - 美国联邦国债存量、公众/政府内部持有、债券品种与平均利率；逐只证券核对的 3/12 个月到期本金、平均剩余期限及月度分布。
@@ -79,3 +80,13 @@ python -m http.server 8766 --directory site
 多页 API 响应全部读取，并保存每页网址及 SHA-256；分页缺失或分类小计不一致时保留旧值。源表部分历史持有分类与总额有小额差异，原值及差额保留，并以 `source-discrepancy` 标记，不自行改平。
 
 官方定义：[MSPD](https://fiscaldata.treasury.gov/datasets/monthly-statement-public-debt/)、[平均利率](https://fiscaldata.treasury.gov/datasets/average-interest-rates-treasury-securities/)、[API 与使用许可](https://fiscaldata.treasury.gov/api-documentation/)。
+
+## 对外债务与资产口径
+
+QEDS SDDS（World Bank API 来源 22）覆盖美国、中国内地、香港、日本、德国、法国。欧元区不由成员国加总替代。所有余额按来源美元数值除以十亿展示；原始期限短债占比仅使用同季度分子与分母。外债按非居民债权人划分，不等于外币债务，也不再叠加 BIS 部门信用。
+
+部门总和与总外债核对。币种分项、债务工具资产和净外债只接入能与同季度总额核对一致的观察期；API 中与总額不相容的零值不解释为真实零余额。未通过核对的季度在各序列说明中列出数量并保留缺口；原始响应地址和哈希可追溯。少数币种未分配原值为负时保留原值及标记，不自行改平。
+
+净外债为总外债减对外债务工具资产，不是含股权等项目的国际投资头寸净值。当前不把原始期限短债称为未来一年到期额，也不将季度短债直接除以年度储备。年度储备含黄金且并非财政可用现金。
+
+来源：[QEDS 方法](https://www.worldbank.org/en/programs/debt-statistics/sdds-methodology)、[数据目录及 CC BY 4.0 许可](https://datacatalog.worldbank.org/search/dataset/0037740/quarterly-external-debt-statistics-sdds)。中文说明与筛选规则为本项目编制；World Bank / IMF 不对本项目背书。
